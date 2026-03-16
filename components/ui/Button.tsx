@@ -11,13 +11,13 @@ export function Button({
   ...props
 }: ButtonProps) {
   const baseStyles =
-    "inline-flex items-center justify-center rounded-full px-6 py-3 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-zinc-900 disabled:opacity-60 disabled:cursor-not-allowed";
+    "inline-flex items-center justify-center rounded-full px-6 py-3 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[#3B4EFF] disabled:cursor-not-allowed disabled:opacity-70 disabled:saturate-75";
 
   const variants: Record<ButtonProps["variant"], string> = {
     primary:
-      "bg-zinc-900 text-zinc-50 shadow-sm hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200",
+      "ds-accent-gradient text-white shadow-sm hover:brightness-95 active:brightness-90",
     secondary:
-      "border border-zinc-300 text-zinc-900 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-50 dark:hover:bg-zinc-800",
+      "border border-[#CBD5E1] bg-white text-[#0F172A] shadow-sm hover:border-[#94A3B8] hover:bg-[#F8FAFF]",
   };
 
   return (

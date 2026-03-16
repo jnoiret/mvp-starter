@@ -7,7 +7,7 @@ type AppShellProps = {
 
 export function AppShell({ children }: AppShellProps) {
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen bg-[#F8FAFF]">
       <AppNav />
       <main className="py-10">{children}</main>
     </div>
