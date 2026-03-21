@@ -5,7 +5,7 @@ import { CandidateNav } from "@/components/candidate/CandidateNav";
 
 export default function CandidateLayout({ children }: { children: ReactNode }) {
   return (
-    <Section className="py-10">
+    <Section className="max-w-[1400px] px-6 py-10 md:px-8">
       <div className="flex flex-col gap-6">
         <header className="ds-card flex flex-col gap-4 p-6">
           <div className="flex flex-col gap-1">

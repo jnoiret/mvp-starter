@@ -63,13 +63,7 @@ function buildInputFromFormData(formData: FormData): SaveProfileInput | null {
 export async function POST(request: Request) {
   try {
     const formData = await request.formData();
-    const file = formData.get("cv");
-    if (!(file instanceof File)) {
-      return NextResponse.json(
-        { success: false, error: "No se recibió el CV para guardar el perfil." },
-        { status: 400 }
-      );
-    }
+    const existingCvUrl = parseStringField(formData.get("cv_url"));
 
     const input = buildInputFromFormData(formData);
     if (!input) {
@@ -80,40 +74,12 @@ export async function POST(request: Request) {
     }
 
     const supabase = getSupabaseServerClient();
-
-    const safeName = file.name.replace(/[^\w.\-]+/g, "_");
-    const objectPath = `candidate-cv/${Date.now()}_${safeName}`;
-    const fileBuffer = Buffer.from(await file.arrayBuffer());
-
-    const uploadResult = await supabase.storage
-      .from("candidate-cvs")
-      .upload(objectPath, fileBuffer, {
-        upsert: false,
-        contentType: file.type || "application/pdf",
-      });
-    console.log("[api/save-profile] storage upload response", uploadResult);
-
-    if (uploadResult.error) {
-      console.error("[api/save-profile] storage upload error", uploadResult.error);
-      return NextResponse.json(
-        {
-          success: false,
-          error: "No se pudo subir el CV en este momento.",
-          reason: uploadResult.error.message,
-        },
-        { status: 500 }
-      );
-    }
-
-    const publicUrlRes = supabase.storage
-      .from("candidate-cvs")
-      .getPublicUrl(uploadResult.data.path);
-    const cvUrl = publicUrlRes.data.publicUrl;
+    const cvUrl = existingCvUrl;
 
     // Insert strictly and only table fields.
     const profileInsertPayload: SaveCandidateProfilePayload = {
       ...input,
-      cv_url: cvUrl,
+      cv_url: cvUrl || "",
     };
 
     // Log exact payload as requested for save diagnostics.

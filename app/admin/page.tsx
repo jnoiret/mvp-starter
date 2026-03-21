@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { AdminShell } from "@/features/admin/AdminShell";
 import { EmptyState } from "@/components/shared/EmptyState";
@@ -156,6 +157,20 @@ export default function AdminPage() {
     );
   }
 
-  return <AdminShell title="Candidate profiles">{content}</AdminShell>;
+  return (
+    <AdminShell
+      title="Candidate profiles"
+      action={
+        <Link
+          href="/admin/dashboard"
+          className="inline-flex items-center justify-center rounded-full border border-[#CBD5E1] bg-white px-4 py-2 text-sm font-medium text-[#0F172A] shadow-sm hover:border-[#94A3B8] hover:bg-[#F8FAFF]"
+        >
+          Dashboard de producto
+        </Link>
+      }
+    >
+      {content}
+    </AdminShell>
+  );
 }
 

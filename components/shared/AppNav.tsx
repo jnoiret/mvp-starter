@@ -11,10 +11,13 @@ export function AppNav() {
           App name
         </Link>
         <nav className="flex items-center gap-4 text-sm text-[#475569]">
-          <Link
-            href="/admin"
-            className="hover:text-[#0F172A]"
-          >
+          <Link href="/recruiter/shortlist" className="hover:text-[#0F172A]">
+            Shortlist
+          </Link>
+          <Link href="/admin/dashboard" className="hover:text-[#0F172A]">
+            Admin dashboard
+          </Link>
+          <Link href="/admin" className="hover:text-[#0F172A]">
             Admin
           </Link>
         </nav>
