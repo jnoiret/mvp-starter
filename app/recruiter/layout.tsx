@@ -3,13 +3,13 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import {
   getCurrentProfile,
-  isCandidateAreaAllowed,
+  isRecruiterAreaAllowed,
 } from "@/lib/auth/getCurrentProfile";
-import { CandidateNav } from "@/components/candidate/CandidateNav";
+import { RecruiterNav } from "@/components/recruiter/RecruiterNav";
 
 export const dynamic = "force-dynamic";
 
-export default async function CandidateLayout({
+export default async function RecruiterLayout({
   children,
 }: {
   children: ReactNode;
@@ -20,31 +20,28 @@ export default async function CandidateLayout({
     redirect("/login");
   }
 
-  if (!isCandidateAreaAllowed(profile?.role)) {
+  if (!isRecruiterAreaAllowed(profile?.role)) {
     redirect("/auth/redirect");
   }
 
   return (
-    <div className="mx-auto w-full max-w-[1400px] px-6 py-10 md:px-8">
+    <div className="mx-auto w-full max-w-7xl px-6 py-10 md:px-8">
       <div className="flex flex-col gap-6">
-        <header className="ds-card flex flex-col gap-4 p-6">
+        <header className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
           <div className="flex flex-col gap-1">
-            <p className="text-xs font-medium text-[#475569]">
-              Fichur · Candidato
-            </p>
+            <p className="text-xs font-medium text-[#475569]">Fichur · Reclutador</p>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <Link
-                href="/candidate/dashboard"
-                className="ds-heading text-base font-semibold tracking-tight"
+                href="/recruiter/dashboard"
+                className="text-base font-semibold tracking-tight text-[#0F172A]"
               >
-                Candidato
+                Reclutador
               </Link>
-              <CandidateNav />
+              <RecruiterNav />
             </div>
           </div>
         </header>
-
-        <div>{children}</div>
+        {children}
       </div>
     </div>
   );

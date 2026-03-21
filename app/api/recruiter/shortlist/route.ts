@@ -30,7 +30,7 @@ function asStatus(value: unknown): ShortlistStatus | null {
 
 export async function GET() {
   try {
-    const supabase = getSupabaseServerClient();
+    const supabase = await getSupabaseServerClient();
     const shortlistTable = "recruiter_shortlist";
     console.info("[api/recruiter/shortlist][GET] fetch start", {
       target_table: shortlistTable,
@@ -190,7 +190,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const supabase = getSupabaseServerClient();
+    const supabase = await getSupabaseServerClient();
     const targetTable = "recruiter_shortlist";
     const upsertPayload = {
       candidate_id,

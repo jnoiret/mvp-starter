@@ -73,7 +73,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const supabase = getSupabaseServerClient();
+    const supabase = await getSupabaseServerClient();
     const cvUrl = existingCvUrl;
 
     // Insert strictly and only table fields.

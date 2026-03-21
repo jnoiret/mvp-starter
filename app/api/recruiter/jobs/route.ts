@@ -52,7 +52,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const supabase = getSupabaseServerClient();
+    const supabase = await getSupabaseServerClient();
     const targetTable = "recruiter_jobs";
     const insertPayload = {
       job_title,
