@@ -99,10 +99,10 @@ function fallbackMatchAnalysis(
     gaps: missing.slice(0, 3).map((item) => `Falta evidencia clara en ${item}.`),
     summary:
       score >= 75
-        ? "Buen encaje general con el rol."
+        ? "Alta probabilidad de respuesta según señales básicas del rol y tu perfil."
         : score >= 55
-          ? "Encaje parcial con oportunidades claras de ajuste."
-          : "Encaje bajo por ahora; conviene reforzar requisitos clave.",
+          ? "Probabilidad media: hay margen para reforzar señales y mejorar el avance."
+          : "Probabilidad de respuesta baja por ahora; conviene reforzar requisitos clave.",
   };
 }
 
@@ -194,10 +194,10 @@ export async function generateJobMatchAnalysis(
         {
           role: "system",
           content: [
-            "Eres un analista de compatibilidad laboral.",
+            "Eres un analista de reclutamiento enfocado en probabilidad de respuesta o entrevista.",
             "Responde solo JSON valido usando el esquema indicado.",
-            "Analiza compatibilidad entre candidate_profile y job_listing.",
-            "Devuelve match_score de 0 a 100, 3-5 strengths, 2-3 gaps y summary breve.",
+            "Analiza señales entre candidate_profile y job_listing que expliquen esa probabilidad.",
+            "Devuelve match_score (0-100) como intensidad de esas señales, 3-5 strengths, 2-3 gaps y summary breve.",
             "Reglas: se realista, no inventes habilidades faltantes, usa espanol, explicaciones cortas.",
           ].join(" "),
         },

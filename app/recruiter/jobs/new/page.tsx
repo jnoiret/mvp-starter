@@ -128,7 +128,7 @@ export default function RecruiterNewJobPage() {
         </div>
         {error ? <p className="text-sm text-red-600">{error}</p> : null}
         <Button type="submit" disabled={loading}>
-          {loading ? "Creando…" : "Crear vacante y ver matches"}
+          {loading ? "Creando…" : "Crear vacante y ver candidatos"}
         </Button>
       </form>
     </div>

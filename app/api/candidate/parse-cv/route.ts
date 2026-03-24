@@ -1,7 +1,27 @@
 import { NextResponse } from "next/server";
-import { PdfReader } from "pdfreader";
 import mammoth from "mammoth";
 import type { WorkMode } from "@/components/candidate/onboarding/types";
+import { extractPdfTextWithSmartFallbacks } from "@/lib/cv/extractPdfWithFallbacks";
+import {
+  analyzeCvExtractedText,
+  COPY_CV_NO_SELECTABLE_TEXT,
+  COPY_CV_WEAK_EXTRACTION,
+  countMeaningfulProfileSignals,
+  type CvParseDiagnostics,
+  type CvParseFeedback,
+  type ProfileSignalFields,
+} from "@/lib/cv/parseDiagnostics";
+import {
+  computeParseTier,
+  describeCoreFieldsForClient,
+  type ParseTier,
+} from "@/lib/cv/parseTier";
+import { normalizeParsedProfileData } from "@/lib/cv/normalizeParsedProfile";
+import {
+  extractStructuredProfileWithOpenAI,
+  structuredProfileHasCoreData,
+  type CvStructuredProfile,
+} from "@/lib/cv/structuredOpenAiParse";
 
 export const runtime = "nodejs";
 
@@ -27,36 +47,13 @@ type ParsedProfile = {
   skills: string;
   tools: string;
   industries: string;
+  /** Free-form role descriptors (e.g. product focus); not persisted to DB in save-profile yet. */
+  specializations: string;
   languages: string;
   education: string;
   summary: string;
   expected_salary: string;
   work_mode: WorkMode | "";
-};
-
-type AiExtractedProfile = {
-  full_name: string;
-  email: string;
-  phone: string;
-  location: string;
-  current_title: string;
-  target_role: string;
-  seniority:
-    | "junior"
-    | "mid"
-    | "senior"
-    | "lead"
-    | "director"
-    | "executive"
-    | "unknown";
-  years_experience: number;
-  skills: string[];
-  tools: string[];
-  industries: string[];
-  languages: string[];
-  education: string[];
-  summary: string;
-  confidence_notes: string[];
 };
 
 type ParsedProfileResponse = {
@@ -78,6 +75,7 @@ type ParsedProfileResponse = {
   skills: string[];
   tools: string[];
   industries: string[];
+  specializations: string[];
   languages: string[];
   education: string[];
   summary: string;
@@ -99,6 +97,7 @@ function emptyProfile(): ParsedProfile {
     skills: "",
     tools: "",
     industries: "",
+    specializations: "",
     languages: "",
     education: "",
     summary: "",
@@ -115,33 +114,6 @@ function toSafeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function toSafeNumber(value: unknown) {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string") {
-    const parsed = Number(value.replace(/[^\d.]/g, ""));
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return 0;
-}
-
-function toSafeStringList(value: unknown) {
-  if (!Array.isArray(value)) return [];
-  const seen = new Set<string>();
-  const result: string[] = [];
-
-  for (const item of value) {
-    if (typeof item !== "string") continue;
-    const cleaned = item.trim();
-    if (!cleaned) continue;
-    const key = cleaned.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    result.push(cleaned);
-  }
-
-  return result;
-}
-
 function splitCommaList(value: string): string[] {
   return value
     .split(",")
@@ -149,11 +121,40 @@ function splitCommaList(value: string): string[] {
     .filter(Boolean);
 }
 
-function toParsedProfileResponse(
-  data: ParsedProfile,
-  aiProfile: AiExtractedProfile | null
-): ParsedProfileResponse {
-  const seniority = data.seniority || aiProfile?.seniority || "unknown";
+function inferSeniorityFromYearsString(yearsStr: string): ParsedProfile["seniority"] {
+  const years = Number(String(yearsStr).replace(/\D/g, ""));
+  if (!Number.isFinite(years)) return "";
+  if (years >= 15) return "director";
+  if (years >= 10) return "lead";
+  if (years >= 6) return "senior";
+  if (years >= 3) return "mid";
+  if (years >= 1) return "junior";
+  return "";
+}
+
+function toParsedProfileResponse(data: ParsedProfile): ParsedProfileResponse {
+  let seniority = data.seniority;
+  if (
+    seniority !== "junior" &&
+    seniority !== "mid" &&
+    seniority !== "senior" &&
+    seniority !== "lead" &&
+    seniority !== "director" &&
+    seniority !== "executive"
+  ) {
+    seniority = inferSeniorityFromYearsString(data.years_experience) || "unknown";
+  }
+  if (
+    seniority !== "junior" &&
+    seniority !== "mid" &&
+    seniority !== "senior" &&
+    seniority !== "lead" &&
+    seniority !== "director" &&
+    seniority !== "executive"
+  ) {
+    seniority = "unknown";
+  }
+
   const years = Number(data.years_experience);
   const yearsExperience = Number.isFinite(years)
     ? Math.max(0, Math.round(years))
@@ -166,92 +167,47 @@ function toParsedProfileResponse(
     location: data.location || data.city,
     current_title: data.current_title,
     target_role: data.target_role,
-    seniority:
-      seniority === "junior" ||
-      seniority === "mid" ||
-      seniority === "senior" ||
-      seniority === "lead" ||
-      seniority === "director" ||
-      seniority === "executive"
-        ? seniority
-        : "unknown",
-    years_experience: yearsExperience,
-    skills: aiProfile?.skills.length ? aiProfile.skills : splitCommaList(data.skills),
-    tools: aiProfile?.tools.length ? aiProfile.tools : splitCommaList(data.tools),
-    industries: aiProfile?.industries.length
-      ? aiProfile.industries
-      : splitCommaList(data.industries),
-    languages: aiProfile?.languages.length
-      ? aiProfile.languages
-      : splitCommaList(data.languages),
-    education: aiProfile?.education.length
-      ? aiProfile.education
-      : splitCommaList(data.education),
-    summary: data.summary,
-    confidence_notes: aiProfile?.confidence_notes ?? [],
-  };
-}
-
-function sanitizeAiExtractedProfile(input: unknown): AiExtractedProfile {
-  const obj =
-    input && typeof input === "object" ? (input as Record<string, unknown>) : {};
-  const seniorityRaw = toSafeString(obj.seniority).toLowerCase();
-  const seniorityValues = new Set([
-    "junior",
-    "mid",
-    "senior",
-    "lead",
-    "director",
-    "executive",
-    "unknown",
-  ]);
-
-  const seniority = seniorityValues.has(seniorityRaw)
-    ? (seniorityRaw as AiExtractedProfile["seniority"])
-    : "unknown";
-
-  return {
-    full_name: toSafeString(obj.full_name),
-    email: toSafeString(obj.email),
-    phone: toSafeString(obj.phone),
-    location: toSafeString(obj.location),
-    current_title: toSafeString(obj.current_title),
-    target_role: toSafeString(obj.target_role),
     seniority,
-    years_experience: Math.max(
-      0,
-      Math.min(60, Math.round(toSafeNumber(obj.years_experience)))
-    ),
-    skills: toSafeStringList(obj.skills).slice(0, 25),
-    tools: toSafeStringList(obj.tools).slice(0, 25),
-    industries: toSafeStringList(obj.industries).slice(0, 10),
-    languages: toSafeStringList(obj.languages).slice(0, 10),
-    education: toSafeStringList(obj.education).slice(0, 10),
-    summary: toSafeString(obj.summary),
-    confidence_notes: toSafeStringList(obj.confidence_notes).slice(0, 10),
+    years_experience: yearsExperience,
+    skills: splitCommaList(data.skills),
+    tools: splitCommaList(data.tools),
+    industries: splitCommaList(data.industries),
+    specializations: splitCommaList(data.specializations),
+    languages: splitCommaList(data.languages),
+    education: splitCommaList(data.education),
+    summary: data.summary,
+    confidence_notes: [],
   };
 }
 
-function mergeAiToParsedProfile(ai: AiExtractedProfile): ParsedProfile {
+function mergeStructuredIntoProfile(
+  base: ParsedProfile,
+  structured: CvStructuredProfile,
+): ParsedProfile {
+  const yearsStr =
+    structured.years_experience > 0
+      ? String(structured.years_experience)
+      : base.years_experience;
+  const skillsStr =
+    structured.skills.length > 0 ? structured.skills.join(", ") : base.skills;
+  const city = structured.city || base.city;
+  const wa = structured.whatsapp || base.whatsapp;
+  const salary = structured.expected_salary || base.expected_salary;
+
   return {
-    full_name: ai.full_name,
-    email: ai.email,
-    phone: ai.phone,
-    whatsapp: ai.phone,
-    location: ai.location,
-    city: ai.location,
-    current_title: ai.current_title,
-    target_role: ai.target_role || ai.current_title,
-    seniority: ai.seniority,
-    years_experience: ai.years_experience > 0 ? String(ai.years_experience) : "",
-    skills: ai.skills.slice(0, 12).join(", "),
-    tools: ai.tools.slice(0, 12).join(", "),
-    industries: ai.industries.slice(0, 8).join(", "),
-    languages: ai.languages.slice(0, 8).join(", "),
-    education: ai.education.slice(0, 8).join(", "),
-    summary: ai.summary,
-    expected_salary: "",
-    work_mode: "",
+    ...base,
+    full_name: structured.full_name || base.full_name,
+    summary: structured.summary || base.summary,
+    target_role: structured.target_role || base.target_role,
+    current_title: structured.target_role || base.current_title,
+    years_experience: yearsStr,
+    skills: skillsStr,
+    city,
+    location: city || base.location,
+    whatsapp: wa,
+    phone: wa || base.phone,
+    expected_salary: salary,
+    seniority: base.seniority || inferSeniorityFromYearsString(yearsStr),
   };
 }
 
@@ -391,6 +347,7 @@ function parseProfileFromText(text: string): ParsedProfile {
     skills: inferSkills(normalized),
     tools: "",
     industries: "",
+    specializations: "",
     languages: "",
     education: "",
     summary: "",
@@ -399,123 +356,15 @@ function parseProfileFromText(text: string): ParsedProfile {
   };
 }
 
-async function parseProfileWithAi(text: string): Promise<AiExtractedProfile | null> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return null;
+const CV_PARSE_DIAG = "[CV_PARSE_DIAG]";
 
-  const prompt = [
-    "You are extracting structured candidate profile data from a CV text.",
-    "Return valid JSON only.",
-    "Do not invent facts that are not reasonably supported.",
-    "Infer target_role from recent experience if missing.",
-    "Infer seniority conservatively.",
-  ].join(" ");
-
-  const schema = {
-    name: "candidate_profile_extract",
-    strict: true,
-    schema: {
-      type: "object",
-      additionalProperties: false,
-      required: [
-        "full_name",
-        "email",
-        "phone",
-        "location",
-        "current_title",
-        "target_role",
-        "seniority",
-        "years_experience",
-        "skills",
-        "tools",
-        "industries",
-        "languages",
-        "education",
-        "summary",
-        "confidence_notes",
-      ],
-      properties: {
-        full_name: { type: "string" },
-        email: { type: "string" },
-        phone: { type: "string" },
-        location: { type: "string" },
-        current_title: { type: "string" },
-        target_role: { type: "string" },
-        seniority: {
-          type: "string",
-          enum: ["junior", "mid", "senior", "lead", "director", "executive", "unknown"],
-        },
-        years_experience: { type: "number" },
-        skills: { type: "array", items: { type: "string" } },
-        tools: { type: "array", items: { type: "string" } },
-        industries: { type: "array", items: { type: "string" } },
-        languages: { type: "array", items: { type: "string" } },
-        education: { type: "array", items: { type: "string" } },
-        summary: { type: "string" },
-        confidence_notes: { type: "array", items: { type: "string" } },
-      },
-    },
-  };
-
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      temperature: 0.1,
-      response_format: {
-        type: "json_schema",
-        json_schema: schema,
-      },
-      messages: [
-        { role: "system", content: prompt },
-        {
-          role: "user",
-          content: `CV text:\n${text.slice(0, 20000)}`,
-        },
-      ],
-    }),
-  });
-
-  if (!response.ok) return null;
-
-  const payload = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string | null } }>;
-  };
-
-  const content = payload.choices?.[0]?.message?.content;
-  if (!content) return null;
-
-  try {
-    return sanitizeAiExtractedProfile(JSON.parse(content));
-  } catch {
-    return null;
-  }
-}
-
-function extractTextFromPdfBuffer(buffer: Buffer): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: string[] = [];
-
-    new PdfReader().parseBuffer(buffer, (error, item) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-
-      if (!item) {
-        resolve(chunks.join("\n").trim());
-        return;
-      }
-
-      if (item.text) {
-        chunks.push(String(item.text));
-      }
-    });
-  });
+function buildDiagnostics(
+  extractedText: string,
+  isPdf: boolean,
+  meaningfulFieldCount: number,
+): CvParseDiagnostics {
+  const q = analyzeCvExtractedText(extractedText, isPdf);
+  return { ...q, meaningfulFieldCount };
 }
 
 async function extractTextFromDocxBuffer(buffer: Buffer): Promise<string> {
@@ -523,154 +372,398 @@ async function extractTextFromDocxBuffer(buffer: Buffer): Promise<string> {
   return result.value.trim();
 }
 
+const PASTED_TEXT_MAX_CHARS = 200_000;
+
+type ParseSourceMeta = {
+  kind: "file" | "paste";
+  fileName?: string;
+  fileType?: string;
+};
+
+type TextExtractionMeta = {
+  pdfjs_fallback_attempted: boolean;
+  pdfjs_fallback_used: boolean;
+  ocr_attempted: boolean;
+  ocr_used: boolean;
+};
+
+const EMPTY_EXTRACTION_META: TextExtractionMeta = {
+  pdfjs_fallback_attempted: false,
+  pdfjs_fallback_used: false,
+  ocr_attempted: false,
+  ocr_used: false,
+};
+
+function toSignalFields(data: ParsedProfile): ProfileSignalFields {
+  return {
+    full_name: data.full_name,
+    email: data.email,
+    phone: data.phone,
+    whatsapp: data.whatsapp,
+    city: data.city,
+    location: data.location,
+    current_title: data.current_title,
+    target_role: data.target_role,
+    years_experience: data.years_experience,
+    skills: data.skills,
+    tools: data.tools,
+    expected_salary: data.expected_salary,
+    summary: data.summary,
+  };
+}
+
+async function buildParseResponseFromExtractedText(
+  extractedText: string,
+  isPdf: boolean,
+  meta: ParseSourceMeta,
+  extractionMeta: TextExtractionMeta = EMPTY_EXTRACTION_META,
+): Promise<NextResponse> {
+  const extractedLength = extractedText.trim().length;
+  const textQuality = analyzeCvExtractedText(extractedText, isPdf);
+
+  const unusableText =
+    extractedLength < 40 || (isPdf && textQuality.likelyScannedPdf);
+
+  if (unusableText) {
+    const diag = buildDiagnostics(extractedText, isPdf, 0);
+    console.info(CV_PARSE_DIAG, {
+      step: "parse_input_unusable",
+      reason:
+        extractedLength < 40 ? "very_low_text" : "likely_scanned_or_garbage_pdf",
+      source: meta.kind,
+      ...diag,
+    });
+    console.info("[cv-parse-debug] server: insufficient or low-quality text", {
+      source: meta.kind,
+      fileName: meta.fileName,
+      fileType: meta.fileType,
+      extractedLength,
+      likelyScannedPdf: textQuality.likelyScannedPdf,
+    });
+    return NextResponse.json(
+      {
+        success: true,
+        parsed_profile: toParsedProfileResponse(emptyProfile()),
+        data: emptyProfile(),
+        meta: {
+          extracted_characters: extractedLength,
+          scanned_pdf_fallback_attempted:
+            extractionMeta.pdfjs_fallback_attempted || extractionMeta.ocr_attempted,
+          scanned_pdf_fallback_used:
+            extractionMeta.pdfjs_fallback_used || extractionMeta.ocr_used,
+          pdfjs_fallback_attempted: extractionMeta.pdfjs_fallback_attempted,
+          pdfjs_fallback_used: extractionMeta.pdfjs_fallback_used,
+          ocr_attempted: extractionMeta.ocr_attempted,
+          ocr_used: extractionMeta.ocr_used,
+        },
+        parse_feedback: "no_selectable_text" satisfies CvParseFeedback,
+        parse_tier: "extraction_failed" satisfies ParseTier,
+        core_field_analysis: describeCoreFieldsForClient(toSignalFields(emptyProfile())),
+        diagnostics: diag,
+        warning: COPY_CV_NO_SELECTABLE_TEXT,
+      },
+      { status: 200 },
+    );
+  }
+
+  let data = parseProfileFromText(extractedText);
+  const heuristicNonEmpty = Object.values(data).filter(
+    (v) => typeof v === "string" && v.trim().length > 0,
+  ).length;
+  console.info(CV_PARSE_DIAG, {
+    step: "heuristics_complete",
+    source: meta.kind,
+    extractedLength,
+    heuristicNonEmptyStringFields: heuristicNonEmpty,
+  });
+
+  let structured: CvStructuredProfile | null = null;
+  let warning: string | null = null;
+
+  try {
+    structured = await extractStructuredProfileWithOpenAI(extractedText, {
+      log: (step, payload) => console.info(CV_PARSE_DIAG, { step, ...payload }),
+    });
+
+    if (structured && structuredProfileHasCoreData(structured)) {
+      data = mergeStructuredIntoProfile(data, structured);
+      console.info(CV_PARSE_DIAG, {
+        step: "server_structured_merged_into_profile",
+        structuredPreview: {
+          full_name: structured.full_name,
+          target_role: structured.target_role,
+          skillsCount: structured.skills.length,
+          years: structured.years_experience,
+        },
+      });
+    } else if (!process.env.OPENAI_API_KEY) {
+      warning =
+        "No pudimos completar todo automáticamente. Revisa y ajusta tus datos antes de continuar.";
+    } else if (!structured) {
+      warning =
+        "No pudimos completar todo automáticamente. Revisa y ajusta tus datos antes de continuar.";
+    }
+  } catch (parseErr) {
+    warning =
+      "No pudimos completar todo automáticamente. Revisa y ajusta tus datos antes de continuar.";
+    console.warn(CV_PARSE_DIAG, {
+      step: "server_openai_merge_caught",
+      message: parseErr instanceof Error ? parseErr.message : String(parseErr),
+    });
+  }
+
+  data = normalizeParsedProfileData(data);
+
+  const meaningfulFieldCount = countMeaningfulProfileSignals(data);
+  let parse_feedback: CvParseFeedback =
+    meaningfulFieldCount >= 3 ? "ok" : "weak_profile_data";
+
+  if (meaningfulFieldCount >= 3) {
+    warning = null;
+  } else {
+    warning = COPY_CV_WEAK_EXTRACTION;
+  }
+
+  const diagnostics = buildDiagnostics(
+    extractedText,
+    isPdf,
+    meaningfulFieldCount,
+  );
+
+  const parsedProfile = toParsedProfileResponse(data);
+
+  const parse_tier = computeParseTier({
+    parse_feedback,
+    meaningfulFieldCount,
+    data: toSignalFields(data),
+  });
+
+  console.info(CV_PARSE_DIAG, {
+    step: "server_response_ready",
+    source: meta.kind,
+    extractedCharacters: extractedLength,
+    structuredOpenAiMerged: Boolean(structured && structuredProfileHasCoreData(structured)),
+    parse_feedback,
+    ...diagnostics,
+  });
+
+  console.info("[cv-parse-debug] server: parse result", {
+    source: meta.kind,
+    fileName: meta.fileName,
+    fileType: meta.fileType,
+    extractedCharacters: extractedLength,
+    structuredParseUsed: Boolean(structured && structuredProfileHasCoreData(structured)),
+    parse_feedback,
+    diagnostics,
+    warning,
+    dataSnapshot: {
+      full_name: data.full_name,
+      summary: data.summary?.slice(0, 80),
+      target_role: data.target_role,
+      current_title: data.current_title,
+      years_experience: data.years_experience,
+      skills: data.skills?.slice(0, 120),
+      city: data.city,
+      location: data.location,
+      whatsapp: data.whatsapp,
+      phone: data.phone,
+      expected_salary: data.expected_salary,
+    },
+    parsedProfileSnapshot: {
+      full_name: parsedProfile.full_name,
+      years_experience: parsedProfile.years_experience,
+      skillsCount: parsedProfile.skills?.length,
+      target_role: parsedProfile.target_role,
+    },
+  });
+
+  return NextResponse.json(
+    {
+      success: true,
+      parsed_profile: parsedProfile,
+      data,
+      meta: {
+        extracted_characters: extractedLength,
+        scanned_pdf_fallback_attempted:
+          extractionMeta.pdfjs_fallback_attempted || extractionMeta.ocr_attempted,
+        scanned_pdf_fallback_used:
+          extractionMeta.pdfjs_fallback_used || extractionMeta.ocr_used,
+        pdfjs_fallback_attempted: extractionMeta.pdfjs_fallback_attempted,
+        pdfjs_fallback_used: extractionMeta.pdfjs_fallback_used,
+        ocr_attempted: extractionMeta.ocr_attempted,
+        ocr_used: extractionMeta.ocr_used,
+      },
+      parse_feedback,
+      parse_tier,
+      core_field_analysis: describeCoreFieldsForClient(toSignalFields(data)),
+      diagnostics,
+      warning,
+      scanned_pdf_fallback_attempted:
+        extractionMeta.pdfjs_fallback_attempted || extractionMeta.ocr_attempted,
+      scanned_pdf_fallback_used:
+        extractionMeta.pdfjs_fallback_used || extractionMeta.ocr_used,
+    },
+    { status: 200 },
+  );
+}
+
 export async function POST(request: Request) {
   try {
     const formData = await request.formData();
     const file = formData.get("cv");
+    const pastedRaw = formData.get("pasted_text");
+    const pastedText =
+      typeof pastedRaw === "string" ? normalizeText(pastedRaw) : "";
 
-    if (!(file instanceof File)) {
+    const hasFile = file instanceof File && file.size > 0;
+
+    if (!hasFile && !pastedText) {
+      console.warn(CV_PARSE_DIAG, {
+        step: "server_no_input",
+        formFieldKeys: [...formData.keys()],
+      });
       return NextResponse.json(
-        { error: "No se recibió un archivo de CV." },
-        { status: 400 }
+        {
+          error:
+            "Envía un archivo PDF o DOCX, o pega el texto de tu CV en el campo indicado.",
+        },
+        { status: 400 },
       );
     }
 
-    const lowerName = file.name.toLowerCase();
-    const isPdf = file.type === "application/pdf" || lowerName.endsWith(".pdf");
+    if (hasFile && !(file instanceof File)) {
+      return NextResponse.json(
+        { error: "No se recibió un archivo de CV válido." },
+        { status: 400 },
+      );
+    }
+
+    if (!hasFile && pastedText.length > PASTED_TEXT_MAX_CHARS) {
+      return NextResponse.json(
+        {
+          error: `El texto pegado supera el límite de ${PASTED_TEXT_MAX_CHARS.toLocaleString("es-ES")} caracteres.`,
+        },
+        { status: 400 },
+      );
+    }
+
+    if (!hasFile) {
+      console.info(CV_PARSE_DIAG, {
+        step: "server_pasted_text_received",
+        charLength: pastedText.length,
+      });
+      return buildParseResponseFromExtractedText(pastedText, false, {
+        kind: "paste",
+      });
+    }
+
+    const cvFile = file as File;
+
+    console.info(CV_PARSE_DIAG, {
+      step: "server_file_received",
+      fileName: cvFile.name,
+      fileType: cvFile.type,
+      fileSize: cvFile.size,
+      fieldName: "cv",
+    });
+
+    const lowerName = cvFile.name.toLowerCase();
+    const isPdf = cvFile.type === "application/pdf" || lowerName.endsWith(".pdf");
     const isDocx =
-      file.type ===
+      cvFile.type ===
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
       lowerName.endsWith(".docx");
 
     if (!isPdf && !isDocx) {
       return NextResponse.json(
         { error: "Formato no compatible. Usa un archivo PDF o DOCX." },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
     const maxBytes = 5 * 1024 * 1024;
-    if (file.size > maxBytes) {
+    if (cvFile.size > maxBytes) {
       return NextResponse.json(
         { error: "El archivo supera el tamaño máximo de 5 MB." },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    const arrayBuffer = await file.arrayBuffer();
+    const arrayBuffer = await cvFile.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
     let extractedText = "";
 
     try {
-      extractedText = isPdf
-        ? await extractTextFromPdfBuffer(buffer)
-        : await extractTextFromDocxBuffer(buffer);
+      extractedText = isPdf ? "" : await extractTextFromDocxBuffer(buffer);
     } catch (parseError) {
       const reason =
         parseError instanceof Error
           ? `${parseError.name}: ${parseError.message}`
           : String(parseError);
 
+      console.info("[cv-parse-debug] server: extract failed", {
+        fileName: cvFile.name,
+        fileType: cvFile.type,
+        reason,
+      });
+
+      const diag = buildDiagnostics("", isPdf, 0);
+      console.info(CV_PARSE_DIAG, {
+        step: "parse_input_unusable",
+        reason: "extract_threw",
+        ...diag,
+      });
       return NextResponse.json(
         {
           success: true,
-          parsed_profile: toParsedProfileResponse(emptyProfile(), null),
+          parsed_profile: toParsedProfileResponse(emptyProfile()),
           data: emptyProfile(),
           meta: {
             extracted_characters: 0,
             scanned_pdf_fallback_attempted: false,
             scanned_pdf_fallback_used: false,
+            pdfjs_fallback_attempted: false,
+            pdfjs_fallback_used: false,
+            ocr_attempted: false,
+            ocr_used: false,
           },
-          warning:
-            "No pudimos analizar tu CV automáticamente. Puedes continuar y completar tu perfil manualmente.",
+          parse_feedback: "no_selectable_text" satisfies CvParseFeedback,
+          parse_tier: "extraction_failed" satisfies ParseTier,
+          core_field_analysis: describeCoreFieldsForClient(toSignalFields(emptyProfile())),
+          diagnostics: diag,
+          warning: COPY_CV_NO_SELECTABLE_TEXT,
           reason,
         },
-        { status: 200 }
+        { status: 200 },
       );
     }
 
-    const extractedLength = extractedText.trim().length;
-
-    if (extractedLength < 40) {
-      return NextResponse.json(
-        {
-          success: true,
-          parsed_profile: toParsedProfileResponse(emptyProfile(), null),
-          data: emptyProfile(),
-          meta: {
-            extracted_characters: extractedLength,
-            scanned_pdf_fallback_attempted: false,
-            scanned_pdf_fallback_used: false,
-          },
-          warning: isPdf
-            ? "No pudimos leer texto de este archivo. Parece ser un PDF escaneado o sin texto seleccionable. Prueba con un PDF exportado desde Word/Google Docs o sube un archivo DOCX."
-            : "No encontramos suficiente texto en tu archivo. Puedes completar tu perfil manualmente.",
-        },
-        { status: 200 }
-      );
+    let extractionMeta: TextExtractionMeta = EMPTY_EXTRACTION_META;
+    if (isPdf) {
+      const r = await extractPdfTextWithSmartFallbacks(buffer);
+      extractedText = r.text;
+      extractionMeta = r.meta;
     }
 
-    let data = parseProfileFromText(extractedText);
-    let aiProfile: AiExtractedProfile | null = null;
-    let warning: string | null = null;
-
-    try {
-      aiProfile = await parseProfileWithAi(extractedText);
-
-      if (aiProfile) {
-        const aiMapped = mergeAiToParsedProfile(aiProfile);
-        data = {
-          ...data,
-          full_name: aiMapped.full_name || data.full_name,
-          email: aiMapped.email || data.email,
-          phone: aiMapped.phone || data.phone,
-          whatsapp: aiMapped.whatsapp || data.whatsapp,
-          location: aiMapped.location || data.location,
-          city: aiMapped.city || data.city,
-          current_title: aiMapped.current_title || data.current_title,
-          target_role: aiMapped.target_role || data.target_role,
-          seniority: aiMapped.seniority || data.seniority,
-          years_experience: aiMapped.years_experience || data.years_experience,
-          skills: aiMapped.skills || data.skills,
-          tools: aiMapped.tools || data.tools,
-          industries: aiMapped.industries || data.industries,
-          languages: aiMapped.languages || data.languages,
-          education: aiMapped.education || data.education,
-          summary: aiMapped.summary || data.summary,
-        };
-      } else {
-        warning =
-          "No pudimos completar todo automáticamente. Revisa y ajusta tus datos antes de continuar.";
-      }
-    } catch {
-      warning =
-        "No pudimos completar todo automáticamente. Revisa y ajusta tus datos antes de continuar.";
-    }
-
-    const parsedProfile = toParsedProfileResponse(data, aiProfile);
-
-    return NextResponse.json(
+    return buildParseResponseFromExtractedText(
+      extractedText,
+      isPdf,
       {
-        success: true,
-        parsed_profile: parsedProfile,
-        data,
-        meta: {
-          extracted_characters: extractedLength,
-          scanned_pdf_fallback_attempted: false,
-          scanned_pdf_fallback_used: false,
-        },
-        warning,
-        scanned_pdf_fallback_attempted: false,
-        scanned_pdf_fallback_used: false,
+        kind: "file",
+        fileName: cvFile.name,
+        fileType: cvFile.type,
       },
-      { status: 200 }
+      extractionMeta,
     );
   } catch (error) {
     console.error("CV parse route error:", error);
-
     const reason =
       error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    console.error(CV_PARSE_DIAG, {
+      step: "server_unhandled_error",
+      reason,
+    });
 
     return NextResponse.json(
       { error: "No pudimos procesar el CV en este momento.", reason },

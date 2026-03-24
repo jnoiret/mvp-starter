@@ -11,6 +11,7 @@ import {
   getJobMatchAnalysis,
   type MatchAnalysis,
 } from "@/components/jobs/jobMatchAnalysisClient";
+import { getProbabilityPresentationFromAiOnly } from "@/lib/jobs/responseProbabilityUi";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 
 type CandidateProfile = {
@@ -303,7 +304,7 @@ export default function RecruiterCandidateDetailPage() {
       <div className="flex flex-col gap-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <Link href={backHref} className="text-sm text-[#475569] hover:text-[#0F172A]">
-            ← Volver a matches
+            ← Volver a candidatos
           </Link>
           <div className="flex flex-wrap items-center gap-2">
             {job ? (
@@ -375,8 +376,8 @@ export default function RecruiterCandidateDetailPage() {
                 <span className="font-medium text-[#0F172A]">Contexto actual:</span>{" "}
                 {job.job_title || "Vacante"} · {job.company || "Empresa no especificada"}
                 {analysis
-                  ? ` · Match ${analysis.match_score > 0 ? `${analysis.match_score}%` : "inicial"}`
-                  : " · Compatibilidad por revisar"}
+                  ? ` · ${getProbabilityPresentationFromAiOnly(analysis.match_score).label}`
+                  : " · Probabilidad por revisar"}
               </p>
             ) : null}
           </div>
@@ -463,7 +464,9 @@ export default function RecruiterCandidateDetailPage() {
         </section>
 
         <section className="ds-card p-5">
-          <h2 className="text-base font-semibold text-[#0F172A]">Compatibilidad con esta vacante</h2>
+          <h2 className="text-base font-semibold text-[#0F172A]">
+            Probabilidad de respuesta para esta vacante
+          </h2>
           {job ? (
             analysis ? (
               <div className="mt-3 grid gap-4 md:grid-cols-3">
@@ -472,7 +475,7 @@ export default function RecruiterCandidateDetailPage() {
                     Recomendación
                   </p>
                   <p className="mt-1 line-clamp-3">
-                    Match: {analysis.match_score > 0 ? `${analysis.match_score}%` : "Inicial"} ·{" "}
+                    {getProbabilityPresentationFromAiOnly(analysis.match_score).label} ·{" "}
                     {analysis.summary}
                   </p>
                 </div>
@@ -496,11 +499,11 @@ export default function RecruiterCandidateDetailPage() {
                 </div>
               </div>
             ) : (
-              <p className="mt-3 text-sm text-[#64748B]">Compatibilidad por revisar.</p>
+              <p className="mt-3 text-sm text-[#64748B]">Probabilidad por revisar.</p>
             )
           ) : (
             <p className="mt-3 text-sm text-[#64748B]">
-              Abre este perfil desde la página de matches para ver el contexto de vacante.
+              Abre este perfil desde la vista de candidatos de la vacante para ver el contexto.
             </p>
           )}
         </section>

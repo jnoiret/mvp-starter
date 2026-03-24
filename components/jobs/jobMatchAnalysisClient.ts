@@ -75,7 +75,8 @@ function fallback(payload: MatchPayload): MatchAnalysis {
     match_score: Math.max(0, Math.min(100, Math.round(ratio * 100))),
     strengths: shared.slice(0, 5).map((item) => `Experiencia en ${item}.`),
     gaps: missing.slice(0, 3).map((item) => `Falta evidencia clara en ${item}.`),
-    summary: "Resumen rapido no disponible en este momento.",
+    summary:
+      "Vista rápida de señales que influyen en la probabilidad de respuesta (sin detalle de IA en este momento).",
   };
 }
 

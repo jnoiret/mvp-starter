@@ -7,12 +7,22 @@ import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { LoadingState } from "@/components/shared/LoadingState";
 import { PageHeader } from "@/components/shared/PageHeader";
-import WhyRecommended from "@/components/jobs/WhyRecommended";
+import { JobRequirementBreakdown } from "@/components/jobs/JobRequirementBreakdown";
 import {
   getJobMatchAnalysis,
   type MatchAnalysis,
 } from "@/components/jobs/jobMatchAnalysisClient";
 import { deriveJobApplicationStateMap } from "@/lib/candidate/application-state";
+import {
+  getJobCardWhyBullets,
+} from "@/lib/jobs/jobCardDecisionSignals";
+import { computeJobRequirementBreakdown } from "@/lib/jobs/jobRequirementBreakdown";
+import {
+  alignmentSummaryFromTier,
+  applyPrimaryCtaLabel,
+  getProbabilityPresentation,
+  getProbabilityPresentationFromRequirementBreakdown,
+} from "@/lib/jobs/responseProbabilityUi";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 
 type JobDetail = {
@@ -35,9 +45,7 @@ type CandidateProfile = {
   city: string | null;
   expected_salary: number | null;
   summary?: string | null;
-  tools?: string | null;
   industries?: string | null;
-  seniority?: string | null;
   years_experience?: number | null;
 };
 
@@ -65,48 +73,10 @@ function toSkillList(value: string | string[] | null | undefined): string[] {
     .filter(Boolean);
 }
 
-function roleMatchesClosely(targetRole: string | null, jobTitle: string | null) {
-  if (!targetRole || !jobTitle) return false;
-  const role = normalize(targetRole);
-  const title = normalize(jobTitle);
-  if (!role || !title) return false;
-
-  if (role === title || role.includes(title) || title.includes(role)) return true;
-
-  const roleTokens = role.split(" ").filter(Boolean);
-  const titleTokens = title.split(" ").filter(Boolean);
-  if (roleTokens.length === 0 || titleTokens.length === 0) return false;
-
-  const overlap = roleTokens.filter((token) => titleTokens.includes(token)).length;
-  const ratio = overlap / Math.max(roleTokens.length, titleTokens.length);
-  return ratio >= 0.6;
-}
-
-function parseSalaryRange(salaryRange: string | null) {
-  if (!salaryRange) return null;
-  const numbers = salaryRange
-    .replace(/\./g, "")
-    .match(/\d+(?:,\d+)?/g)
-    ?.map((n) => Number(n.replace(",", ".")));
-
-  if (!numbers || numbers.length === 0) return null;
-  if (numbers.length === 1) {
-    return { min: numbers[0], max: numbers[0] };
-  }
-
-  const sorted = [...numbers].sort((a, b) => a - b);
-  return { min: sorted[0], max: sorted[sorted.length - 1] };
-}
-
 function isRemote(workMode: string | null) {
   if (!workMode) return false;
   const mode = normalize(workMode);
   return mode.includes("remoto") || mode.includes("remote");
-}
-
-function getStarVisual(score: number) {
-  const clamped = Math.min(5, Math.max(0, score));
-  return `${"★".repeat(clamped)}${"☆".repeat(5 - clamped)}`;
 }
 
 function getLocationWorkModeLine(city: string | null, workMode: string | null) {
@@ -139,53 +109,14 @@ function formatSkillLabelEs(skill: string) {
     .join(" ");
 }
 
-function calculateMatchScore(job: JobDetail | null, candidate: CandidateProfile | null) {
-  if (!job || !candidate) return 0;
-
-  let score = 0;
-
-  if (roleMatchesClosely(candidate.target_role, job.title)) score += 1;
-
-  const candidateSkills = toSkillList(candidate.skills);
-  const requiredSkills = toSkillList(job.required_skills);
-  if (candidateSkills.length > 0 && requiredSkills.length > 0) {
-    const sharedCount = requiredSkills.filter((skill) =>
-      candidateSkills.includes(skill)
-    ).length;
-    if (sharedCount >= 2) score += 2;
-    else if (sharedCount >= 1) score += 1;
-  }
-
-  if (
-    candidate.work_mode &&
-    job.work_mode &&
-    normalize(candidate.work_mode) === normalize(job.work_mode)
-  ) {
-    score += 1;
-  }
-
-  if (
-    isRemote(job.work_mode) ||
-    (candidate.city && job.city && normalize(candidate.city) === normalize(job.city))
-  ) {
-    score += 1;
-  }
-
-  const range = parseSalaryRange(job.salary_range);
-  if (
-    range &&
-    typeof candidate.expected_salary === "number" &&
-    candidate.expected_salary >= range.min &&
-    candidate.expected_salary <= range.max
-  ) {
-    score += 1;
-  }
-
-  return Math.min(5, Math.max(0, score));
-}
-
-function getDeterministicMatchPercent(starScore: number) {
-  return Math.max(0, Math.min(100, Math.round((starScore / 5) * 100)));
+function candidateForJobCard(c: CandidateProfile | null) {
+  if (!c) return null;
+  return {
+    target_role: c.target_role,
+    skills: c.skills,
+    industries: c.industries,
+    years_experience: c.years_experience,
+  };
 }
 
 function buildMatchPayload(job: JobDetail, candidate: CandidateProfile) {
@@ -193,9 +124,9 @@ function buildMatchPayload(job: JobDetail, candidate: CandidateProfile) {
     candidate_profile: {
       summary: candidate.summary ?? "",
       skills: candidate.skills ?? "",
-      tools: candidate.tools ?? "",
+      tools: "",
       industries: candidate.industries ?? "",
-      seniority: candidate.seniority ?? "",
+      seniority: "",
       years_experience: candidate.years_experience ?? 0,
     },
     job_listing: {
@@ -233,17 +164,45 @@ export default function CandidateJobDetailPage() {
   const persistedViewKeysRef = useRef<Set<string>>(new Set());
 
   const renderedSkills = useMemo(() => toSkillList(job?.required_skills), [job]);
-  const matchScore = useMemo(
-    () => calculateMatchScore(job, candidateProfile),
-    [job, candidateProfile]
-  );
+  const requirementBreakdown = useMemo(() => {
+    if (!job || !candidateProfile) return null;
+    return computeJobRequirementBreakdown(job, {
+      target_role: candidateProfile.target_role,
+      skills: candidateProfile.skills,
+      years_experience: candidateProfile.years_experience ?? null,
+    });
+  }, [job, candidateProfile]);
   const locationModeLine = useMemo(
     () => getLocationWorkModeLine(job?.city ?? null, job?.work_mode ?? null),
     [job?.city, job?.work_mode]
   );
-  const displayMatchPercent = useMemo(
-    () => aiMatchAnalysis?.match_score ?? getDeterministicMatchPercent(matchScore),
-    [aiMatchAnalysis, matchScore]
+  const probabilityPresentation = useMemo(() => {
+    if (requirementBreakdown) {
+      return getProbabilityPresentationFromRequirementBreakdown(
+        requirementBreakdown.tier,
+        aiMatchAnalysis,
+      );
+    }
+    return getProbabilityPresentation(aiMatchAnalysis, 0);
+  }, [aiMatchAnalysis, requirementBreakdown]);
+  const alignmentPresentation = useMemo(() => {
+    if (requirementBreakdown) {
+      return alignmentSummaryFromTier(requirementBreakdown.tier);
+    }
+    return {
+      headline: "Comparación con el anuncio",
+      subline: "Completa tu perfil para ver el desglose frente a esta vacante.",
+    };
+  }, [requirementBreakdown]);
+  const applyContextBullets = useMemo(
+    () =>
+      job
+        ? getJobCardWhyBullets(job, candidateForJobCard(candidateProfile), {
+            aiStrengths: aiMatchAnalysis?.strengths,
+            max: 5,
+          })
+        : [],
+    [job, candidateProfile, aiMatchAnalysis?.strengths],
   );
 
   useEffect(() => {
@@ -297,7 +256,9 @@ export default function CandidateJobDetailPage() {
 
         const { data: profileData, error: profileError } = await supabase
           .from("candidate_profiles")
-          .select("id, email, target_role, work_mode, skills, city, expected_salary")
+          .select(
+            "id, email, target_role, work_mode, skills, city, expected_salary, summary, industries, years_experience",
+          )
           .order("created_at", { ascending: false })
           .limit(1)
           .maybeSingle();
@@ -319,6 +280,12 @@ export default function CandidateJobDetailPage() {
               skills: (profileData.skills as string | null) ?? null,
               city: (profileData.city as string | null) ?? null,
               expected_salary: (profileData.expected_salary as number | null) ?? null,
+              summary: (profileData.summary as string | null | undefined) ?? null,
+              industries: (profileData.industries as string | null | undefined) ?? null,
+              years_experience:
+                typeof profileData.years_experience === "number"
+                  ? profileData.years_experience
+                  : null,
             }
           : null;
         setCandidateProfile(profile);
@@ -621,11 +588,10 @@ export default function CandidateJobDetailPage() {
         <div className="flex flex-col gap-7">
           <div className="rounded-xl border border-zinc-100 bg-slate-50/70 p-3.5">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
-                Match: {getStarVisual(matchScore)}
-              </span>
-              <span className="rounded-full bg-indigo-100 px-3 py-1 text-xs font-medium text-indigo-700">
-                IA: {displayMatchPercent}%
+              <span
+                className={`rounded-full px-3 py-1 text-xs font-semibold ${probabilityPresentation.badgeClass}`}
+              >
+                {probabilityPresentation.label}
               </span>
               {applied ? (
                 <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-700">
@@ -637,20 +603,33 @@ export default function CandidateJobDetailPage() {
                 </span>
               ) : null}
             </div>
+            <p className="mt-3 text-sm text-[#475569]">
+              <span className="font-semibold text-[#0F172A]">{alignmentPresentation.headline}</span>
+              {" — "}
+              {alignmentPresentation.subline}
+            </p>
             <div className="mt-3 space-y-1 text-sm text-[#475569]">
               {locationModeLine ? <p>{locationModeLine}</p> : null}
               {job.salary_range ? <p>{formatSalaryDisplay(job.salary_range)}</p> : null}
             </div>
           </div>
 
+          {requirementBreakdown ? (
+            <JobRequirementBreakdown
+              variant="authenticated"
+              cumplesCon={requirementBreakdown.cumplesCon}
+              teFalta={requirementBreakdown.teFalta}
+            />
+          ) : null}
+
           {aiMatchAnalysis ? (
             <section className="rounded-xl border border-zinc-100 bg-white p-4">
-              <h3 className="text-sm font-semibold text-[#0F172A]">Compatibilidad con tu perfil</h3>
+              <h3 className="text-sm font-semibold text-[#0F172A]">Contexto adicional (IA)</h3>
               <p className="mt-1 text-sm text-[#475569]">{aiMatchAnalysis.summary}</p>
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">
-                    Fortalezas
+                    Coincidencias (IA)
                   </p>
                   <ul className="mt-1 space-y-1 text-sm text-[#334155]">
                     {aiMatchAnalysis.strengths.map((item, idx) => (
@@ -659,8 +638,8 @@ export default function CandidateJobDetailPage() {
                   </ul>
                 </div>
                 <div>
-                  <p className="text-xs font-semibold uppercase tracking-wide text-rose-700">
-                    Brechas
+                  <p className="text-xs font-semibold uppercase tracking-wide text-zinc-600">
+                    Diferencias (IA)
                   </p>
                   <ul className="mt-1 space-y-1 text-sm text-[#334155]">
                     {aiMatchAnalysis.gaps.map((item, idx) => (
@@ -671,8 +650,6 @@ export default function CandidateJobDetailPage() {
               </div>
             </section>
           ) : null}
-
-          <WhyRecommended job={job} candidate={candidateProfile} matchScore={matchScore} />
 
           <div className="space-y-2">
             <p className="text-xs font-medium uppercase tracking-wide text-[#475569]">
@@ -706,9 +683,20 @@ export default function CandidateJobDetailPage() {
 
         <div className="mt-1 border-t border-zinc-100 pt-5">
           <div className="rounded-2xl bg-[#F8FAFF] p-3 sm:p-4">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <p className="text-xs text-[#64748B]">Acciones de esta vacante</p>
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
+            <p className="text-sm font-medium text-[#334155]">
+              {probabilityPresentation.label}
+            </p>
+            <ul className="mt-2 space-y-1.5 text-xs leading-relaxed text-[#475569]">
+              {applyContextBullets.slice(0, 3).map((line, idx) => (
+                <li key={`apply-ctx-${idx}`} className="flex gap-2">
+                  <span className="shrink-0 text-[#94A3B8]" aria-hidden>
+                    ·
+                  </span>
+                  <span>{line}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
               <Button
                 variant={applied ? "secondary" : "primary"}
                 type="button"
@@ -720,11 +708,11 @@ export default function CandidateJobDetailPage() {
                     : "sm:order-2"
                 }
               >
-                {loadingAction.applied
-                  ? "Enviando..."
-                  : applied
-                    ? "Postulado"
-                    : "Postularme"}
+                {applyPrimaryCtaLabel(
+                  probabilityPresentation.tier,
+                  applied,
+                  loadingAction.applied
+                )}
               </Button>
             {!applied ? (
               <Button
@@ -737,7 +725,6 @@ export default function CandidateJobDetailPage() {
                 {loadingAction.saved ? "Guardando..." : saved ? "Guardada" : "Guardar"}
               </Button>
             ) : null}
-              </div>
             </div>
           </div>
         </div>

@@ -1,4 +1,6 @@
 import { redirect } from "next/navigation";
+import { effectiveProfileRole } from "@/lib/admin/adminAllowlist";
+import { isCandidateAreaAllowed } from "@/lib/auth/getCurrentProfile";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
 
 export default async function CandidateLayout({
@@ -20,10 +22,15 @@ export default async function CandidateLayout({
     .from("profiles")
     .select("role")
     .eq("id", user.id)
-    .single();
+    .maybeSingle();
 
-  if (error || !profile || profile.role !== "candidate") {
-    redirect("/login");
+  if (error) {
+    redirect("/auth/redirect");
+  }
+
+  const role = effectiveProfileRole(user.email, profile?.role);
+  if (!isCandidateAreaAllowed(role)) {
+    redirect("/auth/redirect");
   }
 
   return <>{children}</>;

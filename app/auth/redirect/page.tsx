@@ -1,29 +1,13 @@
-import { redirect } from "next/navigation";
-import { isAllowedAdminEmail } from "@/lib/admin/adminAllowlist";
-import { getCurrentProfile } from "@/lib/auth/getCurrentProfile";
+import { Suspense } from "react";
+import { AuthRedirectClient } from "./AuthRedirectClient";
+import { LoadingState } from "@/components/shared/LoadingState";
 
 export const dynamic = "force-dynamic";
 
-export default async function AuthRedirectPage() {
-  const { user, profile } = await getCurrentProfile();
-
-  if (!user || !profile?.role) {
-    redirect("/login");
-  }
-
-  switch (profile.role) {
-    case "candidate":
-      redirect("/candidate/dashboard");
-    case "recruiter":
-      redirect("/recruiter/dashboard");
-    case "admin": {
-      const email = user.email ?? profile.email ?? null;
-      if (isAllowedAdminEmail(email)) {
-        redirect("/admin/dashboard");
-      }
-      redirect("/");
-    }
-    default:
-      redirect("/login");
-  }
+export default function AuthRedirectPage() {
+  return (
+    <Suspense fallback={<LoadingState />}>
+      <AuthRedirectClient />
+    </Suspense>
+  );
 }

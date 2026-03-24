@@ -11,6 +11,7 @@ import {
   getJobMatchAnalysis,
   type MatchAnalysis,
 } from "@/components/jobs/jobMatchAnalysisClient";
+import { recruiterAnalysisProbabilityBadge } from "@/lib/jobs/responseProbabilityUi";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 
 type RecruiterJob = {
@@ -84,13 +85,6 @@ function getTopSkills(skills: string | null, max = 5) {
     .map((item) => item.trim())
     .filter(Boolean)
     .slice(0, max);
-}
-
-function getMatchBadge(analysis: AnalysisState) {
-  if (analysis.status === "loading") return "Analizando...";
-  if (analysis.status === "error" || !analysis.data) return "Compatibilidad por revisar";
-  if (analysis.data.match_score > 0) return `Match: ${analysis.data.match_score}%`;
-  return "Match inicial";
 }
 
 function toCandidatePayload(candidate: CandidateProfile) {
@@ -447,7 +441,7 @@ export default function RecruiterJobMatchesPage() {
         </div>
 
         <PageHeader
-          title={`Matches para ${job.job_title ?? "vacante"}`}
+          title={`Candidatos para ${job.job_title ?? "vacante"}`}
           description={job.company ?? "Empresa no especificada"}
         />
 
@@ -458,6 +452,7 @@ export default function RecruiterJobMatchesPage() {
           const topSkills = getTopSkills(candidate.skills, 5);
           const cvValid = isValidCvUrl(candidate.cv_url);
           const shortSummary = deriveCandidateSummary(candidate);
+          const probabilityBadge = recruiterAnalysisProbabilityBadge(analysis);
 
           return (
             <article
@@ -482,8 +477,10 @@ export default function RecruiterJobMatchesPage() {
                         Top {index + 1}
                       </span>
                     ) : null}
-                    <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">
-                      {getMatchBadge(analysis)}
+                    <span
+                      className={`rounded-full px-3 py-1 text-xs font-semibold ${probabilityBadge.badgeClass}`}
+                    >
+                      {probabilityBadge.label}
                     </span>
                   </div>
                 </div>
@@ -531,7 +528,9 @@ export default function RecruiterJobMatchesPage() {
                 </div>
 
                 {analysis.status === "loading" ? (
-                  <p className="text-sm text-[#64748B]">Analizando compatibilidad con IA...</p>
+                  <p className="text-sm text-[#64748B]">
+                    Analizando probabilidad de respuesta con IA...
+                  </p>
                 ) : analysis.status === "error" ? (
                   <p className="text-sm text-rose-600">
                     No pudimos analizar este perfil por ahora.

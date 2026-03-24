@@ -6,11 +6,13 @@ import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/utils";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { LoadingState } from "@/components/shared/LoadingState";
+import { ProductEmptyState } from "@/components/shared/ProductEmptyState";
 import { PageHeader } from "@/components/shared/PageHeader";
 import {
   getJobMatchAnalysis,
   type MatchAnalysis,
 } from "@/components/jobs/jobMatchAnalysisClient";
+import { recruiterAnalysisProbabilityBadge } from "@/lib/jobs/responseProbabilityUi";
 
 type ShortlistStatus = "saved" | "reviewing" | "interview" | "rejected";
 type PageStatus = "loading" | "success" | "error";
@@ -167,10 +169,7 @@ function toJobPayload(job: NonNullable<ShortlistItem["job"]>) {
 }
 
 function getMatchLabel(analysis: AnalysisState) {
-  if (analysis.status === "loading") return "Analizando…";
-  if (analysis.status === "error" || !analysis.data) return "Compatibilidad por revisar";
-  if (analysis.data.match_score > 0) return `${analysis.data.match_score}% match`;
-  return "Match inicial";
+  return recruiterAnalysisProbabilityBadge(analysis).label;
 }
 
 export default function RecruiterShortlistPage() {
@@ -432,31 +431,18 @@ export default function RecruiterShortlistPage() {
 
   if (rankedItems.length === 0) {
     return (
-      <div className="mx-auto w-full max-w-7xl px-6 md:px-8 pb-12">
-        <div className="flex flex-col gap-8">
+      <div className="mx-auto w-full max-w-7xl px-6 py-8 pb-12 md:px-8">
+        <div className="flex flex-col gap-10">
           <PageHeader
             title="Pipeline de shortlist"
-            description="Aquí verás candidatos que guardes desde las coincidencias de cada vacante."
+            description="Candidatos que guardes desde las coincidencias de cada vacante."
           />
-          <EmptyState
-            title="Aún no tienes candidatos en el pipeline"
-            description="Abre una vacante, ve a la vista de matches y usa «Guardar candidato» para añadirlo a tu shortlist. Podrás moverlo por etapas y tomar notas desde aquí."
-            action={
-              <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
-                <Link
-                  href="/recruiter/jobs/new"
-                  className={cn(
-                    "inline-flex items-center justify-center rounded-full px-6 py-3 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-[#3B4EFF]",
-                    "ds-accent-gradient text-white shadow-sm hover:brightness-95 active:brightness-90"
-                  )}
-                >
-                  Crear una vacante
-                </Link>
-                <p className="max-w-xs text-left text-xs text-[#64748B] sm:text-center">
-                  Si ya tienes vacantes, entra al detalle de una y abre <strong>Matches</strong> para guardar perfiles.
-                </p>
-              </div>
-            }
+          <ProductEmptyState
+            title="Aún no tienes candidatos guardados"
+            subtitle="Explora perfiles y guarda los candidatos que te interesen."
+            ctaLabel="Ver candidatos"
+            ctaHref="/recruiter/dashboard"
+            icon="people"
           />
         </div>
       </div>
@@ -494,9 +480,14 @@ export default function RecruiterShortlistPage() {
         </div>
 
         {visibleRanked.length === 0 ? (
-          <p className="rounded-xl border border-dashed border-zinc-200 bg-zinc-50/80 px-4 py-8 text-center text-sm text-zinc-600">
-            No hay candidatos en esta etapa. Cambia de pestaña o mueve candidatos desde otra vista.
-          </p>
+          <ProductEmptyState
+            className="!max-w-lg !py-10"
+            title="Nadie en esta etapa"
+            subtitle="Prueba otra pestaña o actualiza estados desde la vista de matches de una vacante."
+            ctaLabel="Ir al panel"
+            ctaHref="/recruiter/dashboard"
+            icon="people"
+          />
         ) : (
           <ul className="flex flex-col gap-4">
             {visibleRanked.map(({ item, key, analysis }) => {
@@ -545,7 +536,7 @@ export default function RecruiterShortlistPage() {
                         </div>
                         <div>
                           <dt className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                            Match con la vacante
+                            Probabilidad de respuesta
                           </dt>
                           <dd className="font-medium text-[#334155]">{getMatchLabel(analysis)}</dd>
                         </div>

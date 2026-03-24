@@ -14,6 +14,8 @@ type SaveCandidateProfilePayload = {
   expected_salary: number;
   work_mode: string;
   cv_url: string;
+  summary: string;
+  industries: string;
 };
 
 type SaveProfileInput = Omit<SaveCandidateProfilePayload, "cv_url">;
@@ -43,6 +45,8 @@ function buildInputFromFormData(formData: FormData): SaveProfileInput | null {
     skills: parseStringField(formData.get("skills")),
     expected_salary: expectedSalary,
     work_mode: parseStringField(formData.get("work_mode")),
+    summary: parseStringField(formData.get("summary")),
+    industries: parseStringField(formData.get("industries")),
   };
 
   if (

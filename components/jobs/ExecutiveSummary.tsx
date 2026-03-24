@@ -6,12 +6,12 @@ type ExecutiveSummaryProps = {
 
 function getSummaryMessage(matchScore: number) {
   if (matchScore >= 4) {
-    return "You appear to be a strong match for this role based on your profile.";
+    return "Your profile suggests a strong likelihood of a response or interview for this role.";
   }
   if (matchScore === 3) {
-    return "You could be a potential match for this role, but some requirements may be missing.";
+    return "You could hear back on this role, but some requirements may need reinforcement.";
   }
-  return "This role may require skills or experience not strongly present in your profile.";
+  return "Response likelihood may be limited until key skills or experience signals are stronger.";
 }
 
 export default function ExecutiveSummary({

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { LoadingState } from "@/components/shared/LoadingState";
+import { ProductEmptyState } from "@/components/shared/ProductEmptyState";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 
 type Tab = "saved" | "applied";
@@ -383,21 +384,35 @@ export default function CandidateApplicationsPage() {
         description={errorMessage ?? "Ocurrió un error inesperado."}
       />
     );
-  } else if (filteredRows.length === 0) {
+  } else if (!candidateEmail) {
     content = (
-      <EmptyState
-        title={
-          activeTab === "saved"
-            ? "Aun no tienes vacantes guardadas"
-            : "Aun no tienes vacantes en seguimiento"
-        }
-        description={
-          activeTab === "saved"
-            ? "Guarda vacantes desde la lista para revisarlas despues con calma."
-            : "Aquí verás tus vacantes postuladas y avances del proceso."
-        }
+      <ProductEmptyState
+        title="Tu perfil aún no está listo"
+        subtitle="Genera tu perfil con IA para empezar a recibir vacantes con mayor probabilidad de respuesta."
+        ctaLabel="Crear perfil con IA"
+        ctaHref="/onboarding"
+        icon="profile"
       />
     );
+  } else if (filteredRows.length === 0) {
+    content =
+      activeTab === "saved" ? (
+        <ProductEmptyState
+          title="Aún no has guardado vacantes"
+          subtitle="Explora la lista y guarda las que quieras revisar con calma."
+          ctaLabel="Explorar vacantes"
+          ctaHref="/candidate/jobs"
+          icon="inbox"
+        />
+      ) : (
+        <ProductEmptyState
+          title="Aún no has aplicado a ninguna vacante"
+          subtitle="Explora oportunidades donde tienes mayor probabilidad de avanzar."
+          ctaLabel="Explorar vacantes"
+          ctaHref="/candidate/jobs"
+          icon="search"
+        />
+      );
   } else {
     content = (
       <section className="grid gap-4 sm:gap-5">

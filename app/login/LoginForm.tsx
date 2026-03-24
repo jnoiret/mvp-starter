@@ -2,6 +2,7 @@
 
 import { useState, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { isAllowedAdminEmail } from "@/lib/admin/adminAllowlist";
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 
 function isSafeRoleNextPath(role: string, next: string): boolean {
@@ -12,6 +13,8 @@ function isSafeRoleNextPath(role: string, next: string): boolean {
   if (role === "admin" && next.startsWith("/admin")) return true;
   return false;
 }
+
+const VALID_ROLES = new Set(["candidate", "recruiter", "admin"]);
 
 export function LoginForm() {
   const router = useRouter();
@@ -25,11 +28,53 @@ export function LoginForm() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [showPasswordLogin, setShowPasswordLogin] = useState(false);
+  const [otpSent, setOtpSent] = useState(false);
   const [showForgotPassword, setShowForgotPassword] = useState(false);
   const [resetEmail, setResetEmail] = useState("");
   const [resetLoading, setResetLoading] = useState(false);
   const [resetError, setResetError] = useState("");
   const [resetSuccess, setResetSuccess] = useState(false);
+
+  async function handleMagicLink(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+
+    try {
+      const supabase = getSupabaseBrowserClient();
+      const redirectBase = `${window.location.origin}/auth/redirect`;
+      const emailRedirectTo =
+        nextPath &&
+        nextPath.startsWith("/") &&
+        !nextPath.startsWith("//") &&
+        !nextPath.includes("..")
+          ? `${redirectBase}?next=${encodeURIComponent(nextPath)}`
+          : redirectBase;
+
+      const { error: otpError } = await supabase.auth.signInWithOtp({
+        email: email.trim(),
+        options: {
+          emailRedirectTo,
+        },
+      });
+
+      if (otpError) {
+        setError(
+          "No pudimos enviar el enlace. Comprueba el correo o inténtalo más tarde.",
+        );
+        setLoading(false);
+        return;
+      }
+
+      setOtpSent(true);
+    } catch (err) {
+      console.error(err);
+      setError("Ocurrió un error al enviar el enlace.");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function handleLogin(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -58,31 +103,36 @@ export function LoginForm() {
         return;
       }
 
+      await fetch("/api/auth/sync-allowlisted-admin", {
+        method: "POST",
+        credentials: "same-origin",
+      });
+
       const { data: profile, error: profileError } = await supabase
         .from("profiles")
         .select("role")
         .eq("id", user.id)
-        .single();
+        .maybeSingle();
 
-      if (profileError || !profile) {
+      if (profileError) {
         setError("No se pudo cargar tu perfil.");
         setLoading(false);
         return;
       }
 
-      if (
-        profile.role !== "candidate" &&
-        profile.role !== "recruiter" &&
-        profile.role !== "admin"
-      ) {
-        setError("Tu perfil no tiene un rol válido.");
-        setLoading(false);
+      let role = profile?.role;
+      if (isAllowedAdminEmail(user.email)) {
+        role = "admin";
+      }
+      if (!role || !VALID_ROLES.has(role)) {
+        router.refresh();
+        router.push("/onboarding/role");
         return;
       }
 
       router.refresh();
 
-      if (nextPath && isSafeRoleNextPath(profile.role, nextPath)) {
+      if (nextPath && isSafeRoleNextPath(role, nextPath)) {
         router.push(nextPath);
         return;
       }
@@ -132,9 +182,9 @@ export function LoginForm() {
 
   return (
     <main className="mx-auto max-w-md px-6 py-12">
-      <h1 className="mb-6 text-2xl font-semibold">Iniciar sesión</h1>
+      <h1 className="mb-6 text-2xl font-semibold">Entrar</h1>
 
-      {showForgotPassword ? (
+      {showPasswordLogin && showForgotPassword ? (
         <div className="space-y-4">
           <button
             type="button"
@@ -146,7 +196,7 @@ export function LoginForm() {
             }}
             className="text-sm text-zinc-600 underline underline-offset-2 hover:text-[#0F172A]"
           >
-            ← Volver a iniciar sesión
+            ← Volver
           </button>
 
           <p className="text-sm leading-relaxed text-zinc-600">
@@ -158,7 +208,7 @@ export function LoginForm() {
               <label className="mb-1 block text-sm">Correo</label>
               <input
                 type="email"
-                className="w-full rounded border px-3 py-2"
+                className="w-full rounded border border-zinc-200 px-3 py-2"
                 value={resetEmail}
                 onChange={(e) => setResetEmail(e.target.value)}
                 required
@@ -180,58 +230,139 @@ export function LoginForm() {
             <button
               type="submit"
               disabled={resetLoading}
-              className="w-full rounded bg-black px-4 py-2 text-white"
+              className="w-full rounded-lg bg-black px-4 py-3 text-sm font-medium text-white"
             >
               {resetLoading ? "Enviando…" : "Enviar enlace"}
             </button>
           </form>
         </div>
-      ) : (
-        <form onSubmit={handleLogin} className="space-y-4">
-          <div>
-            <label className="mb-1 block text-sm">Correo</label>
-            <input
-              type="email"
-              className="w-full rounded border px-3 py-2"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-            />
-          </div>
-
-          <div>
-            <div className="mb-1 flex items-center justify-between gap-2">
-              <label className="block text-sm">Contraseña</label>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowForgotPassword(true);
-                  setResetEmail(email);
-                }}
-                className="text-sm font-medium text-zinc-600 underline decoration-zinc-300 underline-offset-2 hover:text-[#0F172A]"
-              >
-                Olvidé mi contraseña
-              </button>
+      ) : showPasswordLogin ? (
+        <div className="space-y-4">
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <label className="mb-1 block text-sm">Correo</label>
+              <input
+                type="email"
+                className="w-full rounded border border-zinc-200 px-3 py-2"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+                autoComplete="email"
+              />
             </div>
-            <input
-              type="password"
-              className="w-full rounded border px-3 py-2"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-            />
-          </div>
 
-          {error ? <p className="text-sm text-red-600">{error}</p> : null}
+            <div>
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <label className="block text-sm">Contraseña</label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowForgotPassword(true);
+                    setResetEmail(email);
+                  }}
+                  className="text-xs font-medium text-zinc-500 underline decoration-zinc-300 underline-offset-2 hover:text-[#0F172A]"
+                >
+                  Olvidé mi contraseña
+                </button>
+              </div>
+              <input
+                type="password"
+                className="w-full rounded border border-zinc-200 px-3 py-2"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+                autoComplete="current-password"
+              />
+            </div>
 
+            {error ? <p className="text-sm text-red-600">{error}</p> : null}
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full rounded-lg bg-black px-4 py-3 text-sm font-medium text-white"
+            >
+              {loading ? "Entrando…" : "Entrar"}
+            </button>
+          </form>
+
+          <p className="text-center text-xs text-zinc-500">
+            <button
+              type="button"
+              onClick={() => {
+                setShowPasswordLogin(false);
+                setError("");
+                setPassword("");
+                setShowForgotPassword(false);
+              }}
+              className="font-medium underline decoration-zinc-300 underline-offset-2 hover:text-[#0F172A]"
+            >
+              Usar enlace por correo
+            </button>
+          </p>
+        </div>
+      ) : otpSent ? (
+        <div className="space-y-6">
+          <p className="text-sm font-medium leading-relaxed text-zinc-800">
+            Te enviaremos un enlace para iniciar sesión.
+          </p>
+          <p className="text-sm leading-relaxed text-zinc-600">
+            Revisa tu correo (y spam si no lo ves).
+          </p>
           <button
-            type="submit"
-            disabled={loading}
-            className="w-full rounded bg-black px-4 py-2 text-white"
+            type="button"
+            onClick={() => {
+              setOtpSent(false);
+              setError("");
+            }}
+            className="text-sm font-medium text-zinc-600 underline decoration-zinc-300 underline-offset-2 hover:text-[#0F172A]"
           >
-            {loading ? "Entrando..." : "Entrar"}
+            Usar otro correo
           </button>
-        </form>
+        </div>
+      ) : (
+        <div className="space-y-6">
+          <form onSubmit={handleMagicLink} className="space-y-4">
+            <div>
+              <label className="mb-1 block text-sm font-medium text-zinc-700">
+                Correo
+              </label>
+              <input
+                type="email"
+                className="w-full rounded-lg border border-zinc-200 px-3 py-2.5"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="tu@correo.com"
+                required
+                autoComplete="email"
+              />
+            </div>
+
+            {error ? <p className="text-sm text-red-600">{error}</p> : null}
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full rounded-lg bg-black px-4 py-3 text-sm font-medium text-white"
+            >
+              {loading ? "Enviando…" : "Enviar enlace de acceso"}
+            </button>
+          </form>
+
+          <p className="text-center text-xs text-zinc-500">
+            <button
+              type="button"
+              onClick={() => {
+                setShowPasswordLogin(true);
+                setError("");
+                setOtpSent(false);
+              }}
+              className="font-medium underline decoration-zinc-300 underline-offset-2 hover:text-[#0F172A]"
+            >
+              Entrar con contraseña
+            </button>
+          </p>
+        </div>
       )}
     </main>
   );

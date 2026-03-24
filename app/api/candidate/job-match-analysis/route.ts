@@ -13,7 +13,11 @@ type RequestPayload = {
 };
 
 function asString(value: unknown) {
-  return typeof value === "string" ? value : "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.filter((x): x is string => typeof x === "string").join(", ");
+  }
+  return "";
 }
 
 function asNumber(value: unknown) {

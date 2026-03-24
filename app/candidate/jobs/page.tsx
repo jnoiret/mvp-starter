@@ -4,7 +4,11 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
-import WhyRecommended from "@/components/jobs/WhyRecommended";
+import { JobRequirementBreakdown } from "@/components/jobs/JobRequirementBreakdown";
+import {
+  JobsSmartListHeader,
+  type JobsListSortMode,
+} from "@/components/jobs/JobsSmartListHeader";
 import {
   getJobMatchAnalysis,
   type MatchAnalysis,
@@ -12,20 +16,33 @@ import {
 import { PageHeader } from "@/components/shared/PageHeader";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { LoadingState } from "@/components/shared/LoadingState";
+import { ProductEmptyState } from "@/components/shared/ProductEmptyState";
 import { deriveJobApplicationStateMap } from "@/lib/candidate/application-state";
+import {
+  calculateMatchScore,
+  getPostedAgeLabel,
+  orderJobsChronological,
+  orderJobsWithCandidateRanking,
+  type JobListingRow,
+} from "@/lib/jobs/candidateJobsRanking";
+import { computeJobRequirementBreakdown } from "@/lib/jobs/jobRequirementBreakdown";
+import {
+  alignmentSummaryFromTier,
+  applyJobCardCtaLabel,
+  competenciaEstimadaLine,
+  getBreakdownNarrativeSummary,
+  getProbabilityNarrativeSummary,
+  getProbabilityPresentation,
+  getProbabilityPresentationFromRequirementBreakdown,
+} from "@/lib/jobs/responseProbabilityUi";
+import {
+  getJobCardMetaLines,
+  getJobCardWhyBullets,
+  jobCardWhyHeading,
+} from "@/lib/jobs/jobCardDecisionSignals";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 
-type JobListing = {
-  id: string;
-  title: string | null;
-  company_name: string | null;
-  city: string | null;
-  work_mode: string | null;
-  salary_range: string | null;
-  description: string | null;
-  required_skills: string | string[] | null;
-  created_at: string | null;
-};
+type JobListing = JobListingRow;
 
 type CandidateProfile = {
   id: string;
@@ -36,9 +53,7 @@ type CandidateProfile = {
   city: string | null;
   expected_salary: number | null;
   summary?: string | null;
-  tools?: string | null;
   industries?: string | null;
-  seniority?: string | null;
   years_experience?: number | null;
 };
 
@@ -57,229 +72,33 @@ type HiddenUndoState = {
   title: string;
 };
 
-function normalize(text: string) {
-  return text
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^\w\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function toSkillList(value: string | string[] | null | undefined): string[] {
   if (!value) return [];
   if (Array.isArray(value)) {
-    return value.map((item) => normalize(item)).filter(Boolean);
+    return value
+      .map((item) =>
+        item
+          .toLowerCase()
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .replace(/[^\w\s]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim(),
+      )
+      .filter(Boolean);
   }
   return value
     .split(",")
-    .map((item) => normalize(item))
+    .map((item) =>
+      item
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^\w\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim(),
+    )
     .filter(Boolean);
-}
-
-function roleMatchesClosely(targetRole: string | null, jobTitle: string | null) {
-  if (!targetRole || !jobTitle) return false;
-  const role = normalize(targetRole);
-  const title = normalize(jobTitle);
-  if (!role || !title) return false;
-
-  if (role === title || role.includes(title) || title.includes(role)) return true;
-
-  const roleTokens = role.split(" ").filter(Boolean);
-  const titleTokens = title.split(" ").filter(Boolean);
-  if (roleTokens.length === 0 || titleTokens.length === 0) return false;
-
-  const overlap = roleTokens.filter((token) => titleTokens.includes(token)).length;
-  const ratio = overlap / Math.max(roleTokens.length, titleTokens.length);
-  return ratio >= 0.6;
-}
-
-function parseSalaryRange(salaryRange: string | null) {
-  if (!salaryRange) return null;
-  const numbers = salaryRange
-    .replace(/\./g, "")
-    .match(/\d+(?:,\d+)?/g)
-    ?.map((n) => Number(n.replace(",", ".")));
-
-  if (!numbers || numbers.length === 0) return null;
-  if (numbers.length === 1) {
-    return { min: numbers[0], max: numbers[0] };
-  }
-
-  const sorted = [...numbers].sort((a, b) => a - b);
-  return { min: sorted[0], max: sorted[sorted.length - 1] };
-}
-
-function isRemote(workMode: string | null) {
-  if (!workMode) return false;
-  const mode = normalize(workMode);
-  return mode.includes("remoto") || mode.includes("remote");
-}
-
-function calculateMatchScore(job: JobListing, candidate: CandidateProfile | null) {
-  if (!candidate) return 0;
-
-  let score = 0;
-
-  // 1) Role similarity: +1
-  if (roleMatchesClosely(candidate.target_role, job.title)) {
-    score += 1;
-  }
-
-  // 2) Skills overlap: +1 (at least one), +2 (two or more)
-  const candidateSkills = toSkillList(candidate.skills);
-  const requiredSkills = toSkillList(job.required_skills);
-  if (candidateSkills.length > 0 && requiredSkills.length > 0) {
-    const sharedCount = requiredSkills.filter((skill) =>
-      candidateSkills.includes(skill)
-    ).length;
-    if (sharedCount >= 2) score += 2;
-    else if (sharedCount >= 1) score += 1;
-  }
-
-  // 3) Work mode: +1
-  if (
-    candidate.work_mode &&
-    job.work_mode &&
-    normalize(candidate.work_mode) === normalize(job.work_mode)
-  ) {
-    score += 1;
-  }
-
-  // 4) Location: +1 if city matches OR job is remote
-  if (
-    isRemote(job.work_mode) ||
-    (candidate.city &&
-      job.city &&
-      normalize(candidate.city) === normalize(job.city))
-  ) {
-    score += 1;
-  }
-
-  // 5) Salary: +1 if expected salary falls within salary range
-  const range = parseSalaryRange(job.salary_range);
-  if (
-    range &&
-    typeof candidate.expected_salary === "number" &&
-    candidate.expected_salary >= range.min &&
-    candidate.expected_salary <= range.max
-  ) {
-    score += 1;
-  }
-
-  return Math.min(5, Math.max(0, score));
-}
-
-function getNormalizedTokens(value: string | null) {
-  if (!value) return [];
-  return normalize(value)
-    .split(" ")
-    .map((token) => token.trim())
-    .filter(Boolean);
-}
-
-function getOverlapRatio(left: string[], right: string[]) {
-  if (left.length === 0 || right.length === 0) return 0;
-  const rightSet = new Set(right);
-  const overlap = left.filter((token) => rightSet.has(token)).length;
-  return overlap / Math.max(left.length, right.length);
-}
-
-function calculateJobSimilarity(source: JobListing, target: JobListing) {
-  // Heuristic, transparent similarity in [0,1].
-  const roleSimilarity = roleMatchesClosely(source.title, target.title)
-    ? 1
-    : getOverlapRatio(getNormalizedTokens(source.title), getNormalizedTokens(target.title));
-
-  const skillSimilarity = getOverlapRatio(
-    toSkillList(source.required_skills),
-    toSkillList(target.required_skills)
-  );
-
-  const sameWorkMode =
-    source.work_mode && target.work_mode
-      ? normalize(source.work_mode) === normalize(target.work_mode)
-      : false;
-  const sameCity =
-    source.city && target.city ? normalize(source.city) === normalize(target.city) : false;
-  const bothRemote = isRemote(source.work_mode) && isRemote(target.work_mode);
-  const locationModeSimilarity =
-    sameWorkMode || sameCity || bothRemote || isRemote(source.work_mode) || isRemote(target.work_mode)
-      ? 1
-      : 0;
-
-  return roleSimilarity * 0.45 + skillSimilarity * 0.35 + locationModeSimilarity * 0.2;
-}
-
-function getAverageSimilarity(job: JobListing, anchors: JobListing[]) {
-  if (anchors.length === 0) return 0;
-  const total = anchors.reduce(
-    (sum, anchor) => sum + calculateJobSimilarity(job, anchor),
-    0
-  );
-  return total / anchors.length;
-}
-
-type BehaviorRankingContext = {
-  savedAnchors: JobListing[];
-  appliedAnchors: JobListing[];
-  hiddenAnchors: JobListing[];
-  viewedAnchors: JobListing[];
-};
-
-function getBehaviorAdjustment(job: JobListing, context: BehaviorRankingContext) {
-  const savedSimilarity = getAverageSimilarity(job, context.savedAnchors);
-  const appliedSimilarity = getAverageSimilarity(job, context.appliedAnchors);
-  const hiddenSimilarity = getAverageSimilarity(job, context.hiddenAnchors);
-  const viewedSimilarity = getAverageSimilarity(job, context.viewedAnchors);
-
-  // Keep this lightweight so base match score remains dominant.
-  // Positive signals: saved/applied similarities. Negative: hidden similarity.
-  // Viewed gets only a tiny boost (never a penalty) to avoid overreacting.
-  return (
-    appliedSimilarity * 20 +
-    savedSimilarity * 12 +
-    viewedSimilarity * 3 -
-    hiddenSimilarity * 8
-  );
-}
-
-function getPositiveMatchLabel(score: number) {
-  if (score === 5) return "Excelente match";
-  if (score === 4) return "Buen match";
-  return null;
-}
-
-function getStarVisual(score: number) {
-  const clamped = Math.min(5, Math.max(0, score));
-  const filled = "★".repeat(clamped);
-  const empty = "☆".repeat(5 - clamped);
-  return `${filled}${empty}`;
-}
-
-function getPostedAgeLabel(createdAt: string | null) {
-  if (!createdAt) return null;
-  const createdTime = new Date(createdAt).getTime();
-  if (Number.isNaN(createdTime)) return null;
-  const diffMs = Date.now() - createdTime;
-  const days = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)));
-  if (days === 0) return "Hoy";
-  if (days === 1) return "1 d";
-  return `${days} d`;
-}
-
-function getLocationWorkModeLine(city: string | null, workMode: string | null) {
-  if (isRemote(workMode)) return "Remoto";
-  if (city && workMode) return `${city} • ${workMode}`;
-  if (city) return city;
-  if (workMode) return workMode;
-  return null;
-}
-
-function formatSalaryDisplay(salaryRange: string | null) {
-  if (!salaryRange) return null;
-  return salaryRange.replace(/\s*-\s*/g, " – ").trim();
 }
 
 function formatSkillLabelEs(skill: string) {
@@ -299,18 +118,16 @@ function formatSkillLabelEs(skill: string) {
     .join(" ");
 }
 
-function getMatchSummary(matchScore: number) {
-  if (matchScore >= 4) {
-    return "Alta alineación con tu perfil para esta vacante.";
-  }
-  if (matchScore === 3) {
-    return "Alineación intermedia: vale la pena revisar detalles del rol.";
-  }
-  return "Alineación baja por ahora, útil como referencia para próximos pasos.";
-}
-
-function getDeterministicMatchPercent(starScore: number) {
-  return Math.max(0, Math.min(100, Math.round((starScore / 5) * 100)));
+function candidateForJobCard(c: CandidateProfile | null): Parameters<
+  typeof getJobCardWhyBullets
+>[1] {
+  if (!c) return null;
+  return {
+    target_role: c.target_role,
+    skills: c.skills,
+    industries: c.industries,
+    years_experience: c.years_experience,
+  };
 }
 
 function buildMatchPayload(job: JobListing, candidate: CandidateProfile) {
@@ -318,9 +135,11 @@ function buildMatchPayload(job: JobListing, candidate: CandidateProfile) {
     candidate_profile: {
       summary: candidate.summary ?? "",
       skills: candidate.skills ?? "",
-      tools: candidate.tools ?? "",
+      // No candidate_profiles.tools column — stack/tooling is covered by skills.
+      tools: "",
       industries: candidate.industries ?? "",
-      seniority: candidate.seniority ?? "",
+      // No candidate_profiles.seniority column in schema.
+      seniority: "",
       years_experience: candidate.years_experience ?? 0,
     },
     job_listing: {
@@ -332,15 +151,6 @@ function buildMatchPayload(job: JobListing, candidate: CandidateProfile) {
         : (job.required_skills ?? ""),
       industry: "",
     },
-  };
-}
-
-function getShortMatchLine(analysis: MatchAnalysis | null, fallbackScore: number) {
-  const score = analysis?.match_score ?? getDeterministicMatchPercent(fallbackScore);
-  const summary = analysis?.summary?.trim() || "Buen encaje en estrategia de producto.";
-  return {
-    score,
-    summary,
   };
 }
 
@@ -365,73 +175,38 @@ export default function CandidateJobsPage() {
   const persistedViewKeysRef = useRef<Set<string>>(new Set());
   const viewSourceRef = useRef<"split_view_selection" | "auto_select">("auto_select");
   const hiddenUndoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [listSortMode, setListSortMode] = useState<JobsListSortMode>("prioritized");
 
-  const behaviorRankingContext = useMemo<BehaviorRankingContext>(() => {
-    const jobsById = new Map(jobs.map((job) => [job.id, job]));
-    const savedAnchors: JobListing[] = [];
-    const appliedAnchors: JobListing[] = [];
-    const hiddenAnchors: JobListing[] = [];
-    const viewedAnchors: JobListing[] = [];
+  const rankedJobs = useMemo(
+    () =>
+      orderJobsWithCandidateRanking(
+        jobs,
+        candidate,
+        hiddenJobIds,
+        applicationStatusByJob,
+        viewedJobIds,
+      ),
+    [jobs, candidate, hiddenJobIds, applicationStatusByJob, viewedJobIds],
+  );
 
-    Object.entries(applicationStatusByJob).forEach(([jobId, state]) => {
-      const linkedJob = jobsById.get(jobId);
-      if (!linkedJob) return;
-      if (state.applied) {
-        appliedAnchors.push(linkedJob);
-      } else if (state.saved) {
-        savedAnchors.push(linkedJob);
-      }
-    });
-
-    hiddenJobIds.forEach((jobId) => {
-      const linkedJob = jobsById.get(jobId);
-      if (linkedJob) hiddenAnchors.push(linkedJob);
-    });
-
-    viewedJobIds.forEach((jobId) => {
-      const linkedJob = jobsById.get(jobId);
-      if (linkedJob) viewedAnchors.push(linkedJob);
-    });
-
-    return { savedAnchors, appliedAnchors, hiddenAnchors, viewedAnchors };
-  }, [jobs, applicationStatusByJob, hiddenJobIds, viewedJobIds]);
-
-  const orderedJobs = useMemo(() => {
-    const ranking = jobs
-      .filter((job) => !hiddenJobIds.has(job.id))
-      .map((job) => {
-        const matchScore = calculateMatchScore(job, candidate);
-        const behaviorAdjustment = getBehaviorAdjustment(job, behaviorRankingContext);
-        const compositeScore = matchScore * 100 + behaviorAdjustment;
-        const createdAtTime = job.created_at ? new Date(job.created_at).getTime() : 0;
-        return {
-          job,
-          compositeScore,
-          createdAtTime: Number.isNaN(createdAtTime) ? 0 : createdAtTime,
-        };
-      });
-
-    ranking.sort((a, b) => {
-      if (b.compositeScore !== a.compositeScore) {
-        return b.compositeScore - a.compositeScore;
-      }
-      return b.createdAtTime - a.createdAtTime;
-    });
-
-    return ranking.map((item) => item.job);
-  }, [jobs, candidate, hiddenJobIds, behaviorRankingContext]);
+  const displayJobs = useMemo(() => {
+    if (listSortMode === "all") {
+      return orderJobsChronological(jobs, hiddenJobIds);
+    }
+    return rankedJobs;
+  }, [listSortMode, jobs, hiddenJobIds, rankedJobs]);
 
   useEffect(() => {
-    if (orderedJobs.length === 0) {
+    if (displayJobs.length === 0) {
       setSelectedJobId(null);
       return;
     }
     setSelectedJobId((prev) => {
-      if (prev && orderedJobs.some((job) => job.id === prev)) return prev;
+      if (prev && displayJobs.some((job) => job.id === prev)) return prev;
       viewSourceRef.current = "auto_select";
-      return orderedJobs[0].id;
+      return displayJobs[0].id;
     });
-  }, [orderedJobs]);
+  }, [displayJobs]);
 
   useEffect(() => {
     let isMounted = true;
@@ -450,7 +225,9 @@ export default function CandidateJobsPage() {
             ),
           supabase
             .from("candidate_profiles")
-            .select("id, email, target_role, work_mode, skills, city, expected_salary")
+            .select(
+              "id, email, target_role, work_mode, skills, city, expected_salary, summary, industries, years_experience"
+            )
             .order("created_at", { ascending: false })
             .limit(1),
         ]);
@@ -679,11 +456,11 @@ export default function CandidateJobsPage() {
     let cancelled = false;
 
     async function hydrateAiMatchAnalysis() {
-      if (!candidate || orderedJobs.length === 0) return;
+      if (!candidate || rankedJobs.length === 0) return;
 
-      const topJobs = orderedJobs.slice(0, 12);
+      const topJobs = rankedJobs.slice(0, 12);
       const selected = selectedJobId
-        ? orderedJobs.find((job) => job.id === selectedJobId) ?? null
+        ? rankedJobs.find((job) => job.id === selectedJobId) ?? null
         : null;
       const jobsToAnalyze = selected
         ? [...topJobs, selected].filter(
@@ -712,7 +489,7 @@ export default function CandidateJobsPage() {
     return () => {
       cancelled = true;
     };
-  }, [candidate, orderedJobs, aiMatchByJobId, selectedJobId]);
+  }, [candidate, rankedJobs, aiMatchByJobId, selectedJobId]);
 
   async function handleHideJob(job: JobListing) {
     const candidateId = candidate?.id ?? null;
@@ -942,25 +719,60 @@ export default function CandidateJobsPage() {
     );
   } else if (jobs.length === 0) {
     content = (
-      <EmptyState
-        title="No hay vacantes disponibles"
-        description="Aun no hay vacantes publicadas. Vuelve en unos minutos para ver nuevas oportunidades."
+      <ProductEmptyState
+        title="No hay vacantes disponibles ahora"
+        subtitle="Cuando se publiquen oportunidades, podrás verlas aquí con señales claras de encaje."
+        ctaLabel="Ver postulaciones"
+        ctaHref="/candidate/applications"
+        icon="search"
+      />
+    );
+  } else if (displayJobs.length === 0) {
+    content = (
+      <ProductEmptyState
+        title="No hay vacantes en esta vista"
+        subtitle="Puede que las hayas ocultado o el filtro actual no muestre resultados. Prueba el orden «Todas las vacantes» arriba o vuelve a tu panel."
+        ctaLabel="Ir a tu panel"
+        ctaHref="/candidate/dashboard"
+        icon="inbox"
       />
     );
   } else {
     const selectedJob =
-      orderedJobs.find((job) => job.id === selectedJobId) ?? orderedJobs[0] ?? null;
+      displayJobs.find((job) => job.id === selectedJobId) ?? displayJobs[0] ?? null;
 
     content = (
       <>
+        {!candidate ? (
+          <div className="mb-6">
+            <ProductEmptyState
+              title="Tu perfil aún no está listo"
+              subtitle="Genera tu perfil con IA para empezar a recibir vacantes con mayor probabilidad de respuesta."
+              ctaLabel="Crear perfil con IA"
+              ctaHref="/onboarding"
+              icon="profile"
+            />
+          </div>
+        ) : null}
+        <JobsSmartListHeader mode={listSortMode} onModeChange={setListSortMode} />
         <section className="grid gap-4 sm:gap-5 md:hidden">
-          {orderedJobs.map((job) => {
+          {displayJobs.map((job) => {
             const score = calculateMatchScore(job, candidate);
-            const stars = getStarVisual(score);
-            const positiveLabel = getPositiveMatchLabel(score);
             const aiMatch = aiMatchByJobId[job.id] ?? null;
-            const shortMatch = getShortMatchLine(aiMatch, score);
-            const locationModeLine = getLocationWorkModeLine(job.city, job.work_mode);
+            const requirementBreakdown = candidate
+              ? computeJobRequirementBreakdown(job, {
+                  target_role: candidate.target_role,
+                  skills: candidate.skills,
+                  years_experience: candidate.years_experience ?? null,
+                })
+              : null;
+            const probability = requirementBreakdown
+              ? getProbabilityPresentationFromRequirementBreakdown(requirementBreakdown.tier, aiMatch)
+              : getProbabilityPresentation(aiMatch, score);
+            const metaLines = getJobCardMetaLines(job);
+            const whyBullets = getJobCardWhyBullets(job, candidateForJobCard(candidate), {
+              aiStrengths: aiMatch?.strengths,
+            });
             const jobStatus = applicationStatusByJob[job.id] ?? {
               saved: false,
               applied: false,
@@ -971,7 +783,6 @@ export default function CandidateJobsPage() {
             const saveKey = `${job.id}:saved`;
             const applyKey = `${job.id}:applied`;
             const postedAge = getPostedAgeLabel(job.created_at);
-            const labelStyles = "bg-emerald-100 text-emerald-700";
             const stateBadge = isApplied
               ? "border border-emerald-600 bg-emerald-600 text-white shadow-sm"
               : isSaved
@@ -1020,33 +831,44 @@ export default function CandidateJobsPage() {
                 >
                   {hideLoadingByJob[job.id] ? "…" : "×"}
                 </button>
-                <div className="mb-4 space-y-2 border-b border-zinc-100 pb-4">
-                  <p className="text-sm font-medium tracking-tight text-[#0F172A]">{stars}</p>
-                  <p className="text-sm font-semibold text-[#0F172A]">Match: {shortMatch.score}%</p>
-                  <p className="line-clamp-1 text-xs text-[#64748B]">{shortMatch.summary}</p>
-                  {positiveLabel ? (
-                    <span
-                      className={`inline-flex rounded-full px-3 py-1 text-xs font-medium ${labelStyles}`}
-                    >
-                      {positiveLabel}
-                    </span>
-                  ) : null}
+                <div className="mb-4 flex flex-wrap items-center gap-2 border-b border-zinc-100 pb-4">
+                  <span
+                    className={`inline-flex max-w-full rounded-full px-3 py-1 text-xs font-semibold ${probability.badgeClass}`}
+                  >
+                    {probability.label}
+                  </span>
                 </div>
 
-                <div className="flex flex-1 flex-col gap-4">
+                <div className="flex flex-1 flex-col gap-3">
                   <div className="min-w-0 space-y-1">
-                    <h2 className="ds-heading text-xl font-semibold leading-tight tracking-tight">
+                    <h2 className="ds-heading text-xl font-semibold leading-tight tracking-tight text-[#0F172A]">
                       {job.title ?? "Sin título"}
                     </h2>
-                    <p className="text-sm text-[#475569]">
+                    <p className="text-sm font-medium text-[#475569]">
                       {job.company_name ?? "Empresa no especificada"}
                     </p>
                   </div>
 
-                  <div className="space-y-1 text-sm text-[#64748B]">
-                    {locationModeLine ? <p>{locationModeLine}</p> : null}
-                    {job.salary_range ? <p>{formatSalaryDisplay(job.salary_range)}</p> : null}
-                  </div>
+                  <dl className="grid gap-1 text-xs text-[#64748B]">
+                    <div className="flex flex-wrap gap-x-1.5">
+                      <dt className="font-semibold text-[#475569]">Ubicación</dt>
+                      <dd>{metaLines.ubicacion}</dd>
+                    </div>
+                    <div className="flex flex-wrap gap-x-1.5">
+                      <dt className="font-semibold text-[#475569]">Modalidad</dt>
+                      <dd>{metaLines.modalidad}</dd>
+                    </div>
+                    <div className="flex flex-wrap gap-x-1.5">
+                      <dt className="font-semibold text-[#475569]">Salario</dt>
+                      <dd>{metaLines.salario}</dd>
+                    </div>
+                  </dl>
+
+                  <p className="text-xs font-medium text-[#334155]">
+                    {requirementBreakdown
+                      ? alignmentSummaryFromTier(requirementBreakdown.tier).headline
+                      : competenciaEstimadaLine(score)}
+                  </p>
 
                   <div className="flex flex-wrap items-center gap-2">
                     {stateLabel ? (
@@ -1066,7 +888,18 @@ export default function CandidateJobsPage() {
 
                 <div className="mt-6 border-t border-zinc-100 pt-4">
                   <div className="rounded-2xl bg-[#F8FAFF] p-3 sm:p-4">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
+                    <p className="text-sm font-medium text-[#334155]">{probability.label}</p>
+                    <ul className="mt-2 space-y-1.5 text-xs leading-relaxed text-[#475569]">
+                      {whyBullets.slice(0, 3).map((line, idx) => (
+                        <li key={`${job.id}-apply-ctx-${idx}`} className="flex gap-2">
+                          <span className="shrink-0 text-[#94A3B8]" aria-hidden>
+                            ·
+                          </span>
+                          <span>{line}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
                       <Button
                         variant={isApplied ? "secondary" : "primary"}
                         type="button"
@@ -1081,11 +914,10 @@ export default function CandidateJobsPage() {
                             : "sm:order-2"
                         }
                       >
-                        {actionLoading[applyKey]
-                          ? "Enviando..."
-                          : isApplied
-                            ? "Postulado"
-                            : "Postularme"}
+                        {applyJobCardCtaLabel(
+                          isApplied,
+                          actionLoading[applyKey] === true
+                        )}
                       </Button>
                       {!isApplied ? (
                         <Button
@@ -1154,14 +986,25 @@ export default function CandidateJobsPage() {
         <section className="hidden gap-6 overflow-hidden md:grid md:h-[calc(100vh-250px)] md:min-h-0 md:grid-cols-[clamp(360px,32vw,420px)_minmax(0,1fr)]">
           <aside className="ds-card h-full min-h-0 overflow-y-auto p-4">
             <div className="grid gap-3">
-              {orderedJobs.map((job) => {
+              {displayJobs.map((job) => {
                 const score = calculateMatchScore(job, candidate);
-                const positiveLabel = getPositiveMatchLabel(score);
                 const aiMatch = aiMatchByJobId[job.id] ?? null;
-                const shortMatch = getShortMatchLine(aiMatch, score);
+                const requirementBreakdown = candidate
+                  ? computeJobRequirementBreakdown(job, {
+                      target_role: candidate.target_role,
+                      skills: candidate.skills,
+                      years_experience: candidate.years_experience ?? null,
+                    })
+                  : null;
+                const probability = requirementBreakdown
+                  ? getProbabilityPresentationFromRequirementBreakdown(requirementBreakdown.tier, aiMatch)
+                  : getProbabilityPresentation(aiMatch, score);
                 const postedAge = getPostedAgeLabel(job.created_at);
-                const locationModeLine = getLocationWorkModeLine(job.city, job.work_mode);
-                const labelStyles = "bg-emerald-100 text-emerald-700";
+                const listMeta = getJobCardMetaLines(job);
+                const listWhy = getJobCardWhyBullets(job, candidateForJobCard(candidate), {
+                  aiStrengths: aiMatch?.strengths,
+                });
+                const listWhyHeading = jobCardWhyHeading(probability.tier);
                 const state = applicationStatusByJob[job.id] ?? { saved: false, applied: false };
                 const isSelected = selectedJob?.id === job.id;
                 const isApplied = state.applied;
@@ -1203,36 +1046,38 @@ export default function CandidateJobsPage() {
                       }}
                       className="w-full pr-8 text-left"
                     >
-                      <p className="text-xs font-medium tracking-tight text-[#0F172A]">
-                        {getStarVisual(score)}
-                      </p>
-                      <p className="mt-1 text-xs font-semibold text-[#0F172A]">
-                        Match: {shortMatch.score}%
-                      </p>
-                      <p className="mt-1 line-clamp-1 text-xs text-[#64748B]">
-                        {shortMatch.summary}
-                      </p>
-                      {positiveLabel ? (
-                        <span
-                          className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${labelStyles}`}
-                        >
-                          {positiveLabel}
-                        </span>
-                      ) : null}
+                      <span
+                        className={`inline-flex max-w-full rounded-full px-2.5 py-1 text-xs font-semibold ${probability.badgeClass}`}
+                      >
+                        {probability.label}
+                      </span>
                       <p className="mt-2 text-base font-semibold leading-tight text-[#0F172A]">
                         {job.title ?? "Sin título"}
                       </p>
                       <p className="mt-1 text-xs text-[#475569]">
                         {job.company_name ?? "Empresa no especificada"}
                       </p>
-                      {locationModeLine ? (
-                        <p className="mt-2 text-xs text-[#64748B]">{locationModeLine}</p>
-                      ) : null}
-                      {job.salary_range ? (
-                        <p className="mt-1 text-xs text-[#64748B]">
-                          {formatSalaryDisplay(job.salary_range)}
+                      <p className="mt-1.5 text-[11px] leading-tight text-[#64748B]">
+                        {listMeta.ubicacion} · {listMeta.modalidad}
+                      </p>
+                      <p className="text-[11px] leading-tight text-[#64748B]">{listMeta.salario}</p>
+                      <p className="mt-1.5 text-[11px] font-medium text-[#334155]">
+                        {requirementBreakdown
+                          ? alignmentSummaryFromTier(requirementBreakdown.tier).headline
+                          : competenciaEstimadaLine(score)}
+                      </p>
+                      <div className="mt-2 rounded-lg border border-zinc-100 bg-zinc-50/90 p-2">
+                        <p className="text-[10px] font-semibold uppercase tracking-wide text-[#64748B]">
+                          {listWhyHeading}
                         </p>
-                      ) : null}
+                        <ul className="mt-1 space-y-0.5 text-[11px] leading-snug text-[#334155]">
+                          {listWhy.slice(0, 2).map((line, idx) => (
+                            <li key={`${job.id}-list-why-${idx}`} className="line-clamp-2">
+                              · {line}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
                         {cardStateLabel === "Postulado" ? (
                           <span className="rounded-full border border-emerald-600 bg-emerald-600 px-2.5 py-1 font-medium text-white">
@@ -1270,11 +1115,24 @@ export default function CandidateJobsPage() {
               const applyKey = `${selectedJob.id}:applied`;
               const selectedMatchScore = calculateMatchScore(selectedJob, candidate);
               const selectedAiMatch = aiMatchByJobId[selectedJob.id] ?? null;
-              const selectedShortMatch = getShortMatchLine(selectedAiMatch, selectedMatchScore);
-              const selectedPositiveLabel = getPositiveMatchLabel(selectedMatchScore);
-              const selectedLocationModeLine = getLocationWorkModeLine(
-                selectedJob.city,
-                selectedJob.work_mode
+              const selectedRequirementBreakdown = candidate
+                ? computeJobRequirementBreakdown(selectedJob, {
+                    target_role: candidate.target_role,
+                    skills: candidate.skills,
+                    years_experience: candidate.years_experience ?? null,
+                  })
+                : null;
+              const selectedProbability = selectedRequirementBreakdown
+                ? getProbabilityPresentationFromRequirementBreakdown(
+                    selectedRequirementBreakdown.tier,
+                    selectedAiMatch,
+                  )
+                : getProbabilityPresentation(selectedAiMatch, selectedMatchScore);
+              const selectedMeta = getJobCardMetaLines(selectedJob);
+              const selectedWhyBullets = getJobCardWhyBullets(
+                selectedJob,
+                candidateForJobCard(candidate),
+                { aiStrengths: selectedAiMatch?.strengths }
               );
 
               return (
@@ -1291,19 +1149,13 @@ export default function CandidateJobsPage() {
                       </div>
                     </div>
 
-                    <div className="rounded-xl border border-zinc-100 bg-slate-50/70 p-3.5">
+                    <div className="rounded-xl border border-zinc-100 bg-slate-50/70 p-4">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="rounded-full bg-slate-100 px-3.5 py-1.5 text-sm font-semibold tracking-tight text-slate-700">
-                          Match: {getStarVisual(selectedMatchScore)}
+                        <span
+                          className={`rounded-full px-3.5 py-1.5 text-sm font-semibold tracking-tight ${selectedProbability.badgeClass}`}
+                        >
+                          {selectedProbability.label}
                         </span>
-                        <span className="rounded-full bg-indigo-100 px-3 py-1 text-xs font-medium text-indigo-700">
-                          IA: {selectedShortMatch.score}%
-                        </span>
-                        {selectedPositiveLabel ? (
-                          <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-700">
-                            {selectedPositiveLabel}
-                          </span>
-                        ) : null}
                         {isApplied ? (
                           <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-700">
                             Postulado
@@ -1314,24 +1166,45 @@ export default function CandidateJobsPage() {
                           </span>
                         ) : null}
                       </div>
-                      <div className="mt-3 space-y-1 text-sm text-[#475569]">
-                        {selectedLocationModeLine ? <p>{selectedLocationModeLine}</p> : null}
-                        {selectedJob.salary_range ? (
-                          <p>{formatSalaryDisplay(selectedJob.salary_range)}</p>
-                        ) : null}
-                      </div>
+                      <dl className="mt-3 grid gap-1.5 text-sm text-[#64748B]">
+                        <div className="flex flex-wrap gap-x-2">
+                          <dt className="font-semibold text-[#475569]">Ubicación</dt>
+                          <dd>{selectedMeta.ubicacion}</dd>
+                        </div>
+                        <div className="flex flex-wrap gap-x-2">
+                          <dt className="font-semibold text-[#475569]">Modalidad</dt>
+                          <dd>{selectedMeta.modalidad}</dd>
+                        </div>
+                        <div className="flex flex-wrap gap-x-2">
+                          <dt className="font-semibold text-[#475569]">Salario</dt>
+                          <dd>{selectedMeta.salario}</dd>
+                        </div>
+                      </dl>
+                      <p className="mt-3 text-sm font-medium text-[#334155]">
+                        {selectedRequirementBreakdown
+                          ? alignmentSummaryFromTier(selectedRequirementBreakdown.tier).headline
+                          : competenciaEstimadaLine(selectedMatchScore)}
+                      </p>
                     </div>
+
+                    {selectedRequirementBreakdown ? (
+                      <JobRequirementBreakdown
+                        variant="authenticated"
+                        cumplesCon={selectedRequirementBreakdown.cumplesCon}
+                        teFalta={selectedRequirementBreakdown.teFalta}
+                      />
+                    ) : null}
 
                     {selectedAiMatch ? (
                       <section className="rounded-xl border border-zinc-100 bg-white p-4">
                         <h3 className="text-sm font-semibold text-[#0F172A]">
-                          Compatibilidad con tu perfil
+                          Contexto adicional (IA)
                         </h3>
                         <p className="mt-1 text-sm text-[#475569]">{selectedAiMatch.summary}</p>
                         <div className="mt-3 grid gap-3 sm:grid-cols-2">
                           <div>
                             <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">
-                              Fortalezas
+                              Coincidencias (IA)
                             </p>
                             <ul className="mt-1 space-y-1 text-sm text-[#334155]">
                               {selectedAiMatch.strengths.map((item, idx) => (
@@ -1340,8 +1213,8 @@ export default function CandidateJobsPage() {
                             </ul>
                           </div>
                           <div>
-                            <p className="text-xs font-semibold uppercase tracking-wide text-rose-700">
-                              Brechas
+                            <p className="text-xs font-semibold uppercase tracking-wide text-zinc-600">
+                              Diferencias (IA)
                             </p>
                             <ul className="mt-1 space-y-1 text-sm text-[#334155]">
                               {selectedAiMatch.gaps.map((item, idx) => (
@@ -1353,22 +1226,13 @@ export default function CandidateJobsPage() {
                       </section>
                     ) : null}
 
-                    <section className="rounded-xl border border-zinc-100 bg-white">
-                      <details className="group p-4" open={selectedMatchScore >= 4}>
-                        <summary className="cursor-pointer list-none text-sm font-medium text-[#0F172A]">
-                          Análisis de Match con IA
-                        </summary>
-                        <p className="mt-2 text-sm text-[#64748B]">
-                          {getMatchSummary(selectedMatchScore)}
-                        </p>
-                        <div className="mt-4">
-                          <WhyRecommended
-                            matchScore={selectedMatchScore}
-                            job={selectedJob}
-                            candidate={candidate}
-                          />
-                        </div>
-                      </details>
+                    <section className="rounded-xl border border-zinc-100 bg-white p-4">
+                      <h3 className="text-sm font-medium text-[#0F172A]">Sobre la probabilidad mostrada</h3>
+                      <p className="mt-2 text-sm text-[#64748B]">
+                        {selectedRequirementBreakdown
+                          ? getBreakdownNarrativeSummary(selectedRequirementBreakdown.tier)
+                          : getProbabilityNarrativeSummary(selectedMatchScore)}
+                      </p>
                     </section>
 
                     <div className="space-y-2">
@@ -1405,11 +1269,23 @@ export default function CandidateJobsPage() {
 
                   <div className="mt-1 border-t border-zinc-100 pt-5">
                     <div className="rounded-2xl bg-[#F8FAFF] p-3 sm:p-4">
-                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                        <p className="text-xs text-[#64748B]">
-                          Acciones de esta vacante
-                        </p>
-                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
+                      <p className="text-sm font-medium text-[#334155]">
+                        {selectedProbability.label}
+                      </p>
+                      <ul className="mt-2 space-y-1.5 text-xs leading-relaxed text-[#475569]">
+                        {selectedWhyBullets.slice(0, 3).map((line, idx) => (
+                          <li
+                            key={`${selectedJob.id}-footer-ctx-${idx}`}
+                            className="flex gap-2"
+                          >
+                            <span className="shrink-0 text-[#94A3B8]" aria-hidden>
+                              ·
+                            </span>
+                            <span>{line}</span>
+                          </li>
+                        ))}
+                      </ul>
+                      <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
                         <Button
                           variant={isApplied ? "secondary" : "primary"}
                           type="button"
@@ -1421,11 +1297,10 @@ export default function CandidateJobsPage() {
                               : "sm:order-2"
                           }
                         >
-                          {actionLoading[applyKey]
-                            ? "Enviando..."
-                            : isApplied
-                              ? "Postulado"
-                              : "Postularme"}
+                          {applyJobCardCtaLabel(
+                            isApplied,
+                            actionLoading[applyKey] === true
+                          )}
                         </Button>
                         {!isApplied ? (
                           <Button
@@ -1446,7 +1321,6 @@ export default function CandidateJobsPage() {
                                 : "Guardar"}
                           </Button>
                         ) : null}
-                        </div>
                       </div>
                       {isApplied ? (
                         <p className="mt-2 text-xs text-emerald-700">
@@ -1504,7 +1378,7 @@ export default function CandidateJobsPage() {
     <div className="flex flex-col gap-8">
       <PageHeader
         title="Vacantes"
-        description="Explora oportunidades y guarda las que te interesan."
+        description="Explora oportunidades según probabilidad de respuesta y guarda las que te interesan."
         action={
           <Link href="/candidate/applications">
             <Button variant="secondary">Ver postulaciones</Button>

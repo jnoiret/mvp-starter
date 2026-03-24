@@ -10,6 +10,7 @@ import { PageHeader } from "@/components/shared/PageHeader";
 import {
   getJobMatchAnalysis,
 } from "@/components/jobs/jobMatchAnalysisClient";
+import { getProbabilityPresentationFromAiOnly } from "@/lib/jobs/responseProbabilityUi";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 
 type RecruiterJob = {
@@ -83,13 +84,9 @@ function extractRequirementChips(description: string | null, max = 10) {
   return result;
 }
 
-function fitLabel(score: number | null) {
-  if (typeof score !== "number") return "Por revisar";
-  if (score >= 80) return "Muy alto";
-  if (score >= 65) return "Alto";
-  if (score >= 50) return "Medio";
-  if (score > 0) return "Bajo";
-  return "Inicial";
+function responseProbabilityLabelFromAi(score: number | null) {
+  const value = typeof score === "number" && score > 0 ? score : 0;
+  return getProbabilityPresentationFromAiOnly(value);
 }
 
 function deriveCandidateSummary(candidate: ShortlistCandidateProfile) {
@@ -391,7 +388,7 @@ export default function RecruiterJobDetailPage() {
           <div className="flex flex-wrap items-center gap-2">
             <Link href={`/recruiter/jobs/${job.id}/matches`}>
               <Button variant="primary" type="button">
-                Ver matches
+                Ver candidatos
               </Button>
             </Link>
             <Button variant="secondary" type="button" disabled>
@@ -424,7 +421,7 @@ export default function RecruiterJobDetailPage() {
           </section>
           <section className="ds-card p-5">
             <h2 className="text-sm font-semibold uppercase tracking-wide text-[#64748B]">
-              Top matches
+              En entrevista
             </h2>
             <p className="mt-2 text-3xl font-semibold text-[#0F172A]">{interviewCount}</p>
             <p className="mt-1 text-xs text-[#64748B]">En estado interview</p>
@@ -461,26 +458,30 @@ export default function RecruiterJobDetailPage() {
             </div>
           </article>
           <article className="ds-card p-6">
-            <h2 className="text-base font-semibold text-[#0F172A]">Match overview / resultados</h2>
+            <h2 className="text-base font-semibold text-[#0F172A]">
+              Panorama de probabilidad de respuesta
+            </h2>
             <p className="mt-2 text-sm text-[#475569]">
               Revisa candidatos ordenados, guarda shortlist y avanza a entrevistas.
             </p>
             <div className="mt-3 space-y-1 text-sm text-[#334155]">
               <p>
-                <span className="font-medium text-[#0F172A]">Top match:</span>{" "}
+                <span className="font-medium text-[#0F172A]">Candidato destacado:</span>{" "}
                 {topMatch
-                  ? `${topMatch.candidate_name} (${topMatch.score ? `${topMatch.score}%` : "Inicial"})`
+                  ? `${topMatch.candidate_name} — ${responseProbabilityLabelFromAi(topMatch.score).label}`
                   : "Por calcular"}
               </p>
               <p>
-                <span className="font-medium text-[#0F172A]">Promedio de match:</span>{" "}
-                {averageMatchScore ? `${averageMatchScore}%` : "Por calcular"}
+                <span className="font-medium text-[#0F172A]">Tendencia del shortlist:</span>{" "}
+                {averageMatchScore
+                  ? getProbabilityPresentationFromAiOnly(averageMatchScore).label
+                  : "Por calcular"}
               </p>
             </div>
             <div className="mt-4">
               <Link href={`/recruiter/jobs/${job.id}/matches`}>
                 <Button variant="primary" type="button">
-                  Abrir matches
+                  Abrir candidatos
                 </Button>
               </Link>
             </div>
@@ -514,23 +515,34 @@ export default function RecruiterJobDetailPage() {
         </section>
 
         <section className="ds-card p-6">
-          <h2 className="text-base font-semibold text-[#0F172A]">Top matches</h2>
+          <h2 className="text-base font-semibold text-[#0F172A]">
+            Candidatos con mayor probabilidad de respuesta
+          </h2>
           {candidatePreviews.length > 0 ? (
             <ul className="mt-3 space-y-2 text-sm text-[#334155]">
-              {candidatePreviews.map((item, index) => (
-                <li key={`${item.candidate_id}-${index}`} className="rounded-lg border border-zinc-100 p-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="font-medium text-[#0F172A]">{item.candidate_name}</p>
-                    <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">
-                      {typeof item.score === "number" ? `${item.score}%` : "Inicial"}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-xs text-[#64748B]">Fit: {fitLabel(item.score)}</p>
-                </li>
-              ))}
+              {candidatePreviews.map((item, index) => {
+                const prob = responseProbabilityLabelFromAi(item.score);
+                return (
+                  <li
+                    key={`${item.candidate_id}-${index}`}
+                    className="rounded-lg border border-zinc-100 p-3"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="font-medium text-[#0F172A]">{item.candidate_name}</p>
+                      <span
+                        className={`rounded-full px-2.5 py-1 text-xs font-semibold ${prob.badgeClass}`}
+                      >
+                        {prob.label}
+                      </span>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           ) : previewStatus === "loading" ? (
-            <p className="mt-3 text-sm text-[#64748B]">Calculando previews de match...</p>
+            <p className="mt-3 text-sm text-[#64748B]">
+              Calculando probabilidad de respuesta...
+            </p>
           ) : (
             <p className="mt-3 text-sm text-[#64748B]">
               Aún no hay candidatos en shortlist para esta vacante.
@@ -539,7 +551,7 @@ export default function RecruiterJobDetailPage() {
           <div className="mt-4">
             <Link href={`/recruiter/jobs/${job.id}/matches`}>
               <Button variant="secondary" type="button">
-                Ver matches
+                Ver candidatos
               </Button>
             </Link>
           </div>

@@ -1,8 +1,10 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { getCurrentProfile } from "@/lib/auth/getCurrentProfile";
 import { isAllowedAdminEmail } from "@/lib/admin/adminAllowlist";
+import { getCurrentProfile } from "@/lib/auth/getCurrentProfile";
+import { syncAllowlistedAdminProfileForUser } from "@/lib/auth/syncAllowlistedAdminProfile";
+import { getSupabaseServerClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
 
@@ -13,14 +15,28 @@ export default async function AdminLayout({ children }: { children: ReactNode })
     redirect("/login");
   }
 
-  const email = user.email ?? profile?.email ?? null;
+  const email = (user.email ?? profile?.email ?? "").trim();
+  if (!email || !isAllowedAdminEmail(email)) {
+    redirect("/");
+  }
 
-  if (profile?.role !== "admin") {
+  const sync = await syncAllowlistedAdminProfileForUser({
+    userId: user.id,
+    email,
+  });
+  if (!sync.ok) {
     redirect("/auth/redirect");
   }
 
-  if (!isAllowedAdminEmail(email)) {
-    redirect("/");
+  const supabase = await getSupabaseServerClient();
+  const { data: row, error } = await supabase
+    .from("profiles")
+    .select("role")
+    .eq("id", user.id)
+    .maybeSingle();
+
+  if (error || row?.role !== "admin") {
+    redirect("/auth/redirect");
   }
 
   return (

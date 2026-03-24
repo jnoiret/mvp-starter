@@ -6,6 +6,8 @@ export const ADMIN_EMAILS = [
   "noiretvg@gmail.com",
 ] as const;
 
+const VALID_APP_ROLES = new Set(["candidate", "recruiter", "admin"]);
+
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
 }
@@ -14,4 +16,18 @@ export function isAllowedAdminEmail(email: string | null | undefined): boolean {
   if (!email) return false;
   const n = normalizeEmail(email);
   return ADMIN_EMAILS.some((allowed) => normalizeEmail(allowed) === n);
+}
+
+/**
+ * Role used for route access and navigation. Allowlisted emails always resolve to `admin`
+ * so they can reach candidate/recruiter areas and the admin console (after DB sync).
+ */
+export function effectiveProfileRole(
+  email: string | null | undefined,
+  dbRole: string | null | undefined,
+): string | null {
+  if (isAllowedAdminEmail(email)) return "admin";
+  const r = typeof dbRole === "string" ? dbRole.trim() : "";
+  if (!r || !VALID_APP_ROLES.has(r)) return null;
+  return r;
 }

@@ -1,16 +1,6 @@
-import { Suspense } from "react";
-import { SignupForm } from "./SignupForm";
+import { redirect } from "next/navigation";
 
+/** Signup is unified with magic-link login at /login */
 export default function SignupPage() {
-  return (
-    <Suspense
-      fallback={
-        <main className="mx-auto max-w-md px-6 py-12">
-          <p className="text-sm text-zinc-600">Cargando…</p>
-        </main>
-      }
-    >
-      <SignupForm />
-    </Suspense>
-  );
+  redirect("/login");
 }

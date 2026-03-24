@@ -14,6 +14,8 @@ export type CandidateOnboardingData = {
   skills: string;
   tools: string;
   industries: string;
+  /** Parsed from combined title tails (e.g. product focus); session/onboarding only until a DB column exists. */
+  specializations: string;
   languages: string;
   education: string;
   summary: string;

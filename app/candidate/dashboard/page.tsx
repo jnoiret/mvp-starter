@@ -1,23 +1,78 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { PageHeader } from "@/components/shared/PageHeader";
+import { CandidateDashboardDraftCard } from "@/components/candidate/CandidateDashboardDraftCard";
+import { ProfileQualityPanel } from "@/components/candidate/ProfileQualityPanel";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { LoadingState } from "@/components/shared/LoadingState";
+import { ProductEmptyState } from "@/components/shared/ProductEmptyState";
+import { welcomeFirstName } from "@/lib/auth/navUserLabel";
 import { normalizeApplicationStatus } from "@/lib/candidate/application-state";
+import { isCandidateProfileThin } from "@/lib/candidate/profileCompleteness";
+import {
+  competenciaEstimadaLine,
+  getProbabilityPresentation,
+} from "@/lib/jobs/responseProbabilityUi";
+import {
+  getJobCardMetaLines,
+  getJobCardWhyBullets,
+  jobCardWhyHeading,
+} from "@/lib/jobs/jobCardDecisionSignals";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 
 type CandidateProfile = {
   id: string;
   email: string | null;
+  full_name: string | null;
   city: string | null;
   target_role: string | null;
   skills: string | null;
+  summary?: string | null;
   expected_salary: number | null;
   work_mode: string | null;
+  industries?: string | null;
+  years_experience?: number | null;
 };
+
+function DashboardActionCard({
+  href,
+  title,
+  description,
+  accent,
+}: {
+  href: string;
+  title: string;
+  description: string;
+  accent?: boolean;
+}) {
+  return (
+    <Link
+      href={href}
+      className={[
+        "group flex h-full flex-col rounded-2xl border p-5 transition",
+        accent
+          ? "border-indigo-200/90 bg-gradient-to-br from-indigo-50/80 to-violet-50/40 hover:border-indigo-300 hover:shadow-md"
+          : "border-zinc-200/90 bg-white hover:border-zinc-300 hover:shadow-md",
+      ].join(" ")}
+    >
+      <p className="text-[15px] font-semibold tracking-tight text-[#0F172A]">
+        {title}
+      </p>
+      <p className="mt-1.5 flex-1 text-xs leading-relaxed text-zinc-600">
+        {description}
+      </p>
+      <span
+        className={`mt-4 text-xs font-semibold ${
+          accent ? "text-indigo-700" : "text-zinc-700"
+        }`}
+      >
+        Abrir →
+      </span>
+    </Link>
+  );
+}
 
 type Status = "idle" | "loading" | "success" | "error";
 
@@ -44,6 +99,7 @@ type JobListing = {
   salary_range: string | null;
   required_skills: string | string[] | null;
   created_at: string | null;
+  description?: string | null;
 };
 
 type RecentItem = {
@@ -180,62 +236,6 @@ function calculateMatchScore(job: JobListing, candidate: CandidateProfile | null
   return Math.min(5, Math.max(0, score));
 }
 
-function getStars(score: number) {
-  const clamped = Math.min(5, Math.max(0, score));
-  return `${"★".repeat(clamped)}${"☆".repeat(5 - clamped)}`;
-}
-
-function getNormalizedTokens(value: string | null) {
-  if (!value) return [];
-  return normalize(value)
-    .split(" ")
-    .map((token) => token.trim())
-    .filter(Boolean);
-}
-
-function getOverlapRatio(left: string[], right: string[]) {
-  if (left.length === 0 || right.length === 0) return 0;
-  const rightSet = new Set(right);
-  const overlap = left.filter((token) => rightSet.has(token)).length;
-  return overlap / Math.max(left.length, right.length);
-}
-
-function calculateJobSimilarity(source: JobListing, target: JobListing) {
-  const roleSimilarity = roleMatchesClosely(source.title, target.title)
-    ? 1
-    : getOverlapRatio(getNormalizedTokens(source.title), getNormalizedTokens(target.title));
-  const skillSimilarity = getOverlapRatio(
-    toSkillList(source.required_skills),
-    toSkillList(target.required_skills)
-  );
-  const sameWorkMode =
-    source.work_mode && target.work_mode
-      ? normalize(source.work_mode) === normalize(target.work_mode)
-      : false;
-  const sameCity =
-    source.city && target.city ? normalize(source.city) === normalize(target.city) : false;
-  const bothRemote = isRemote(source.work_mode) && isRemote(target.work_mode);
-  const locationModeSimilarity = sameWorkMode || sameCity || bothRemote ? 1 : 0;
-
-  return roleSimilarity * 0.45 + skillSimilarity * 0.35 + locationModeSimilarity * 0.2;
-}
-
-function getAverageSimilarity(job: JobListing, anchors: JobListing[]) {
-  if (anchors.length === 0) return 0;
-  const total = anchors.reduce(
-    (sum, anchor) => sum + calculateJobSimilarity(job, anchor),
-    0
-  );
-  return total / anchors.length;
-}
-
-type RecommendationContext = {
-  savedAnchors: JobListing[];
-  appliedAnchors: JobListing[];
-  hiddenAnchors: JobListing[];
-  viewedAnchors: JobListing[];
-};
-
 const INTERACTION_PRIORITY: Record<InteractionStatus, number> = {
   applied: 3,
   saved: 2,
@@ -260,6 +260,33 @@ export default function CandidateDashboardPage() {
   const [hiddenJobIds, setHiddenJobIds] = useState<Set<string>>(new Set());
   const [candidateEmail, setCandidateEmail] = useState<string | null>(null);
 
+  const reloadProfileOnly = useCallback(async () => {
+    try {
+      const supabase = getSupabaseBrowserClient();
+      const { data, error } = await supabase
+        .from("candidate_profiles")
+        .select(
+          "id, email, full_name, city, target_role, skills, summary, expected_salary, work_mode, industries, years_experience",
+        )
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!error && data) {
+        setProfile(data as CandidateProfile);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void reloadProfileOnly();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [reloadProfileOnly]);
+
   useEffect(() => {
     let isMounted = true;
 
@@ -275,7 +302,7 @@ export default function CandidateDashboardPage() {
             supabase
               .from("candidate_profiles")
               .select(
-                "id, email, city, target_role, skills, expected_salary, work_mode"
+                "id, email, full_name, city, target_role, skills, summary, expected_salary, work_mode, industries, years_experience"
               )
               .order("created_at", { ascending: false })
               .limit(1)
@@ -339,7 +366,7 @@ export default function CandidateDashboardPage() {
           supabase
             .from("job_listings")
             .select(
-              "id, title, company_name, city, work_mode, salary_range, required_skills, created_at"
+              "id, title, company_name, city, work_mode, salary_range, required_skills, created_at, description"
             ),
         ]);
 
@@ -402,6 +429,7 @@ export default function CandidateDashboardPage() {
           salary_range: (job.salary_range as string | null) ?? null,
           required_skills: (job.required_skills as string | string[] | null) ?? null,
           created_at: (job.created_at as string | null) ?? null,
+          description: (job.description as string | null) ?? null,
         }));
         setJobs(listings);
 
@@ -550,21 +578,6 @@ export default function CandidateDashboardPage() {
     };
   }, []);
 
-  const recommendationContext = useMemo<RecommendationContext>(() => {
-    const jobsById = new Map(jobs.map((job) => [job.id, job]));
-    const toAnchors = (ids: Set<string>) =>
-      Array.from(ids)
-        .map((id) => jobsById.get(id))
-        .filter((job): job is JobListing => Boolean(job));
-
-    return {
-      savedAnchors: toAnchors(savedJobIds),
-      appliedAnchors: toAnchors(appliedJobIds),
-      hiddenAnchors: toAnchors(hiddenJobIds),
-      viewedAnchors: toAnchors(viewedJobIds),
-    };
-  }, [jobs, savedJobIds, appliedJobIds, hiddenJobIds, viewedJobIds]);
-
   const recommendedJobs = useMemo(() => {
     return [...jobs]
       .filter((job) => !appliedJobIds.has(job.id))
@@ -580,73 +593,6 @@ export default function CandidateDashboardPage() {
       .slice(0, 5);
   }, [jobs, profile, appliedJobIds, hiddenJobIds]);
 
-  const recommendationReasonByJobId = useMemo(() => {
-    const reasons = new Map<string, string>();
-    for (const job of recommendedJobs) {
-      const score = calculateMatchScore(job, profile);
-      const appliedSimilarity = getAverageSimilarity(job, recommendationContext.appliedAnchors);
-      const savedSimilarity = getAverageSimilarity(job, recommendationContext.savedAnchors);
-      const viewedSimilarity = getAverageSimilarity(job, recommendationContext.viewedAnchors);
-      const hiddenSimilarity = getAverageSimilarity(job, recommendationContext.hiddenAnchors);
-
-      const interestedAnchors = [
-        ...recommendationContext.savedAnchors,
-        ...recommendationContext.appliedAnchors,
-      ];
-      const interestSkillSimilarity = interestedAnchors.length
-        ? interestedAnchors.reduce((sum, anchor) => {
-            const overlap = getOverlapRatio(
-              toSkillList(job.required_skills),
-              toSkillList(anchor.required_skills)
-            );
-            return sum + overlap;
-          }, 0) / interestedAnchors.length
-        : 0;
-
-      const matchesRemotePreference =
-        Boolean(profile?.work_mode) &&
-        normalize(profile.work_mode ?? "").includes("remoto") &&
-        isRemote(job.work_mode);
-
-      const matchesWorkModePreference =
-        Boolean(profile?.work_mode && job.work_mode) &&
-        normalize(profile?.work_mode ?? "") === normalize(job.work_mode ?? "");
-
-      let reason = "Tu perfil tiene buena coincidencia con esta vacante.";
-      if (appliedSimilarity >= 0.5) {
-        reason = "Se parece a roles a los que ya postulaste.";
-      } else if (savedSimilarity >= 0.45) {
-        reason = "Se parece a vacantes que guardaste.";
-      } else if (interestSkillSimilarity >= 0.35) {
-        reason = "Tiene habilidades similares a vacantes que te interesaron.";
-      } else if (matchesRemotePreference) {
-        reason = "Coincide con tu preferencia por trabajo remoto.";
-      } else if (matchesWorkModePreference) {
-        reason = "Coincide con tu modalidad de trabajo preferida.";
-      } else if (viewedSimilarity >= 0.55 && hiddenSimilarity < 0.45) {
-        reason = "Se parece a roles que has explorado.";
-      } else if (score >= 4) {
-        reason = "Tu perfil tiene buena coincidencia con esta vacante.";
-      }
-
-      reasons.set(job.id, reason);
-    }
-    return reasons;
-  }, [recommendedJobs, profile, recommendationContext]);
-
-  function getLocationWorkModeLine(city: string | null, workMode: string | null) {
-    if (isRemote(workMode)) return "Remoto";
-    if (city && workMode) return `${city} • ${workMode}`;
-    if (city) return city;
-    if (workMode) return workMode;
-    return null;
-  }
-
-  function formatSalaryDisplay(salaryRange: string | null) {
-    if (!salaryRange) return null;
-    return salaryRange.replace(/\s*-\s*/g, " – ").trim();
-  }
-
   let content: React.ReactNode = null;
 
   if (status === "idle" || status === "loading") {
@@ -659,8 +605,62 @@ export default function CandidateDashboardPage() {
       />
     );
   } else {
+    const greet = welcomeFirstName(profile?.full_name, candidateEmail);
+    const thin = isCandidateProfileThin(profile);
+
     content = (
-      <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-8">
+        {!profile?.id ? (
+          <ProductEmptyState
+            title="Tu perfil aún no está listo"
+            subtitle="Genera tu perfil con IA para empezar a recibir vacantes con mayor probabilidad de respuesta."
+            ctaLabel="Crear perfil con IA"
+            ctaHref="/onboarding"
+            icon="profile"
+          />
+        ) : null}
+
+        {profile?.id ? <ProfileQualityPanel profile={profile} /> : null}
+
+        <header className="space-y-6">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight text-[#0F172A] sm:text-[1.65rem]">
+              Hola{greet ? `, ${greet}` : ""}
+            </h1>
+            <p className="mt-1 text-sm text-zinc-600">
+              Estas son tus siguientes acciones
+            </p>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <DashboardActionCard
+              href="/candidate/jobs"
+              title="Explorar vacantes"
+              description="Vacantes ordenadas para ti, con señales claras de encaje."
+            />
+            <DashboardActionCard
+              href="/candidate/applications"
+              title="Ver postulaciones"
+              description="Revisa lo que guardaste y lo que ya enviaste."
+            />
+            <DashboardActionCard
+              href="/candidate/onboarding"
+              title="Completar o editar perfil"
+              description="Actualiza rol, habilidades y expectativas cuando quieras."
+            />
+            {thin ? (
+              <DashboardActionCard
+                href="/onboarding"
+                accent
+                title="Crear perfil con IA"
+                description="Sube tu CV y deja que extraigamos tu experiencia en minutos."
+              />
+            ) : null}
+          </div>
+
+          <CandidateDashboardDraftCard />
+        </header>
+
         <section className="grid gap-4 sm:grid-cols-3">
           <article className="ds-card p-5 sm:p-6">
             <p className="text-xs font-medium uppercase tracking-wide text-[#475569]">
@@ -699,53 +699,44 @@ export default function CandidateDashboardPage() {
 
         <section className="ds-card p-5 sm:p-6">
           <h2 className="ds-heading text-base font-semibold tracking-tight">
-            Tus insights
+            Resumen de actividad
           </h2>
-          <p className="mt-1 text-sm text-[#475569]">
-            Señales rápidas para entender cómo avanza tu búsqueda.
-          </p>
           <div className="mt-4 grid gap-3 lg:grid-cols-3">
-            <article className="rounded-xl border border-zinc-100 bg-slate-50 p-4">
-              <p className="text-xs font-semibold uppercase tracking-wide text-[#64748B]">
+            <article className="rounded-xl border border-zinc-100 bg-zinc-50/80 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
                 Actividad
               </p>
-              <div className="mt-3 space-y-2">
-                <p className="text-sm text-[#0F172A]">🔎 Has explorado {summary.viewed} vacantes.</p>
-                <p className="text-sm text-[#0F172A]">
-                  ⭐ Guardaste {summary.saved} vacantes interesantes.
-                </p>
-                <p className="text-sm text-[#0F172A]">📨 Ya aplicaste a {summary.applied} vacantes.</p>
-              </div>
+              <ul className="mt-3 space-y-2 text-sm leading-snug text-[#0F172A]">
+                <li>{summary.viewed} vacantes vistas</li>
+                <li>{summary.saved} guardadas</li>
+                <li>{summary.applied} postulaciones</li>
+              </ul>
             </article>
-            <article className="rounded-xl border border-zinc-100 bg-slate-50 p-4">
-              <p className="text-xs font-semibold uppercase tracking-wide text-[#64748B]">
-                Match
+            <article className="rounded-xl border border-zinc-100 bg-zinc-50/80 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                Señales
               </p>
-              <div className="mt-3 space-y-2">
-                <p className="text-sm text-[#0F172A]">
-                  ✅ {insights.goodMatchApplications} de tus postulaciones tenían buen match.
-                </p>
-                <p className="text-sm text-[#0F172A]">
-                  📈 Has convertido {insights.savedToAppliedRate}% de tus vacantes guardadas en postulaciones.
-                </p>
-                <p className="text-sm text-[#0F172A]">
-                  👀 Viste {insights.highMatchViewedRecently} vacantes con match alto en las últimas 2 semanas.
-                </p>
-              </div>
+              <ul className="mt-3 space-y-2 text-sm leading-snug text-[#0F172A]">
+                <li>
+                  {insights.goodMatchApplications} postulaciones con alta probabilidad de respuesta
+                </li>
+                <li>{insights.savedToAppliedRate}% de guardadas pasaron a postulación</li>
+                <li>
+                  {insights.highMatchViewedRecently} vacantes fuertes vistas en los últimos 14 días
+                </li>
+              </ul>
             </article>
-            <article className="rounded-xl border border-zinc-100 bg-slate-50 p-4">
-              <p className="text-xs font-semibold uppercase tracking-wide text-[#64748B]">
-                Sugerencia
+            <article className="rounded-xl border border-zinc-100 bg-zinc-50/80 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                Siguiente paso
               </p>
-              <div className="mt-3 space-y-2">
-                <p className="text-sm text-[#0F172A]">
-                  {summary.applied === 0
-                    ? "Empieza por postularte a una vacante con match alto para activar tu avance."
-                    : insights.goodMatchApplications < summary.applied
-                      ? "Revisa vacantes con match alto para aumentar tus probabilidades."
-                      : "Vas bien: repite el patrón de tus mejores matches para mantener el avance."}
-                </p>
-              </div>
+              <p className="mt-3 text-sm leading-relaxed text-[#0F172A]">
+                {summary.applied === 0
+                  ? "Postúlate a una vacante con buen encaje para empezar a ver avance."
+                  : insights.goodMatchApplications < summary.applied
+                    ? "Prioriza vacantes con probabilidad alta para mejorar respuestas."
+                    : "Sigue el mismo patrón en vacantes similares a las que ya te funcionaron."}
+              </p>
             </article>
           </div>
         </section>
@@ -755,57 +746,101 @@ export default function CandidateDashboardPage() {
             Vacantes recomendadas para ti hoy
           </h2>
           <p className="mt-1 text-sm text-[#475569]">
-            Vacantes con mejor match que no has ocultado ni postulado.
+            Vacantes con mejor probabilidad de respuesta que no has ocultado ni postulado.
           </p>
 
           {recommendedJobs.length === 0 ? (
-            <p className="mt-4 text-sm text-[#475569]">
-              No hay nuevas recomendaciones hoy. Revisa tus búsquedas guardadas o explora más vacantes.
-            </p>
+            <div className="mt-6">
+              {jobs.length === 0 ? (
+                <p className="text-sm leading-relaxed text-zinc-600">
+                  Cuando haya vacantes publicadas, te sugeriremos las que mejor encajan contigo.
+                </p>
+              ) : thin ? (
+                <ProductEmptyState
+                  title="Mejora tu perfil para ver mejores oportunidades"
+                  subtitle="Un perfil más completo aumenta tus probabilidades de recibir respuesta."
+                  ctaLabel="Editar perfil"
+                  ctaHref="/candidate/onboarding"
+                  icon="profile"
+                />
+              ) : (
+                <ProductEmptyState
+                  title="Explora más vacantes"
+                  subtitle="Ahora mismo no hay nuevas recomendaciones en tu lista. Sigue explorando o revisa las que ya guardaste."
+                  ctaLabel="Explorar vacantes"
+                  ctaHref="/candidate/jobs"
+                  icon="search"
+                />
+              )}
+            </div>
           ) : (
             <ul className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               {recommendedJobs.map((job) => {
                 const score = calculateMatchScore(job, profile);
-                const locationLine = getLocationWorkModeLine(job.city, job.work_mode);
-                const salaryLine = formatSalaryDisplay(job.salary_range);
-                const reason =
-                  recommendationReasonByJobId.get(job.id) ??
-                  "Tu perfil tiene buena coincidencia con esta vacante.";
+                const probability = getProbabilityPresentation(null, score);
+                const meta = getJobCardMetaLines(job);
+                const whyBullets = getJobCardWhyBullets(job, profile, {});
+                const whyHeading = jobCardWhyHeading(probability.tier);
                 return (
                   <li key={job.id}>
                     <Link
                       href={`/candidate/jobs/${job.id}`}
-                      className="group block h-full rounded-xl border border-zinc-100 bg-white p-4 transition hover:border-[#CBD5E1] hover:shadow-sm"
+                      className="group flex h-full flex-col rounded-xl border border-zinc-100 bg-white p-4 transition hover:border-[#CBD5E1] hover:shadow-sm"
                     >
-                      <div className="flex items-start justify-between gap-3">
-                        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
-                          {getStars(score)}
-                        </span>
-                        {score >= 4 ? (
-                          <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-700">
-                            Buen match
-                          </span>
-                        ) : null}
-                      </div>
+                      <span
+                        className={`inline-flex max-w-full rounded-full px-2.5 py-1 text-xs font-semibold ${probability.badgeClass}`}
+                      >
+                        {probability.label}
+                      </span>
 
                       <p className="mt-3 line-clamp-2 text-sm font-semibold text-[#0F172A]">
                         {job.title ?? "Vacante sin título"}
                       </p>
-                      <p className="mt-1 text-xs text-[#475569]">
+                      <p className="mt-1 text-xs font-medium text-[#475569]">
                         {job.company_name ?? "Empresa no especificada"}
                       </p>
 
-                      {locationLine ? (
-                        <p className="mt-2 text-xs text-[#475569]">{locationLine}</p>
-                      ) : null}
-                      {salaryLine ? (
-                        <p className="mt-1 text-xs text-[#475569]">{salaryLine} MXN</p>
-                      ) : null}
-                      <p className="mt-2 line-clamp-1 text-xs text-[#64748B]">{reason}</p>
+                      <dl className="mt-2 grid gap-0.5 text-[11px] text-[#64748B]">
+                        <div className="flex flex-wrap gap-x-1">
+                          <dt className="font-semibold text-[#475569]">Ubicación</dt>
+                          <dd>{meta.ubicacion}</dd>
+                        </div>
+                        <div className="flex flex-wrap gap-x-1">
+                          <dt className="font-semibold text-[#475569]">Modalidad</dt>
+                          <dd>{meta.modalidad}</dd>
+                        </div>
+                        <div className="flex flex-wrap gap-x-1">
+                          <dt className="font-semibold text-[#475569]">Salario</dt>
+                          <dd>{meta.salario}</dd>
+                        </div>
+                      </dl>
 
-                      <p className="mt-3 text-xs font-medium text-[#3B4EFF] group-hover:text-[#2F3DE0]">
-                        Ver vacante
+                      <p className="mt-2 text-[11px] font-medium text-[#334155]">
+                        {competenciaEstimadaLine(score)}
                       </p>
+
+                      <div className="mt-2 flex-1 rounded-lg border border-zinc-100 bg-zinc-50/90 p-2.5">
+                        <p className="text-[10px] font-semibold uppercase tracking-wide text-[#64748B]">
+                          {whyHeading}
+                        </p>
+                        <ul className="mt-1.5 space-y-1 text-[11px] leading-snug text-[#334155]">
+                          {whyBullets.map((line, idx) => (
+                            <li key={`${job.id}-dash-why-${idx}`} className="flex gap-1.5">
+                              <span className="shrink-0 text-[#94A3B8]">·</span>
+                              <span className="line-clamp-3">{line}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+
+                      <div className="mt-3 flex items-center justify-between gap-2 border-t border-zinc-100 pt-3">
+                        <span className="text-xs font-semibold text-[#0F172A]">
+                          Ver vacante y postularme
+                        </span>
+                        <span className="text-xs font-medium text-[#3B4EFF] group-hover:text-[#2F3DE0]">
+                          Abrir →
+                        </span>
+                      </div>
                     </Link>
                   </li>
                 );
@@ -814,43 +849,29 @@ export default function CandidateDashboardPage() {
           )}
         </section>
 
-        <section className="ds-card p-5 sm:p-6">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h2 className="ds-heading text-base font-semibold tracking-tight">
-                Atajos
-              </h2>
-              <p className="mt-1 text-sm text-[#475569]">
-                Continua tu flujo en un solo clic.
-              </p>
-            </div>
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <Link href="/candidate/jobs">
-                <Button>Ver vacantes</Button>
-              </Link>
-              <Link href="/candidate/applications">
-                <Button variant="secondary">Ver mis vacantes</Button>
-              </Link>
-            </div>
-          </div>
-        </section>
-
         <section className="ds-card p-6">
           <h2 className="ds-heading text-base font-semibold tracking-tight">
-            Continúa donde te quedaste
+            Reciente
           </h2>
-          <p className="mt-1 text-sm text-[#475569]">
-            Actividad reciente con prioridad por estado: postuladas, guardadas y vistas.
+          <p className="mt-1 text-sm text-zinc-600">
+            Postuladas, guardadas y vistas, en orden útil.
           </p>
 
           {candidateEmail === null && !profile?.id ? (
-            <p className="mt-4 text-sm text-[#475569]">
-              Completa onboarding para asociar actividad a tu perfil.
+            <p className="mt-4 text-sm text-zinc-600">
+              Cuando completes tu perfil, verás aquí lo que vayas visitando y guardando.
             </p>
           ) : recentActivity.length === 0 ? (
-            <p className="mt-4 text-sm text-[#475569]">
-              Aun no tienes actividad. Explora vacantes y continúa desde aquí.
-            </p>
+            <div className="mt-6">
+              <ProductEmptyState
+                className="max-w-md !py-10"
+                title="Sin actividad reciente"
+                subtitle="Explora vacantes y vuelve aquí para retomar lo que te interesó."
+                ctaLabel="Explorar vacantes"
+                ctaHref="/candidate/jobs"
+                icon="inbox"
+              />
+            </div>
           ) : (
             <ul className="mt-4 space-y-3">
               {recentActivity.map((item) => (
@@ -897,19 +918,6 @@ export default function CandidateDashboardPage() {
     );
   }
 
-  return (
-    <div className="flex flex-col gap-8">
-      <PageHeader
-        title="Tu espacio de búsqueda"
-        description="Da seguimiento a tus vacantes y continúa donde te quedaste."
-        action={
-          <Link href="/candidate/jobs">
-            <Button>Ver vacantes</Button>
-          </Link>
-        }
-      />
-      {content}
-    </div>
-  );
+  return <div className="flex flex-col gap-6">{content}</div>;
 }
 

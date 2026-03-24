@@ -1,3 +1,10 @@
+import type { CoreFieldAnalysis } from "@/lib/cv/coreProfileFieldState";
+import {
+  countMeaningfulProfileSignals,
+  type CvParseDiagnostics,
+  type CvParseFeedback,
+} from "@/lib/cv/parseDiagnostics";
+import type { ParseTier } from "@/lib/cv/parseTier";
 import type { CandidateOnboardingData } from "./types";
 
 type ParsedCandidateProfile = Omit<CandidateOnboardingData, "cv_file">;
@@ -13,6 +20,7 @@ type ParsedProfilePayload = {
   skills: string[];
   tools: string[];
   industries: string[];
+  specializations: string[];
   languages: string[];
   education: string[];
   summary: string;
@@ -25,12 +33,32 @@ type ParseResponse = {
     extracted_characters?: number;
     scanned_pdf_fallback_attempted?: boolean;
     scanned_pdf_fallback_used?: boolean;
+    pdfjs_fallback_attempted?: boolean;
+    pdfjs_fallback_used?: boolean;
+    ocr_attempted?: boolean;
+    ocr_used?: boolean;
   };
+  /** Server-side quality hint for honest UX. */
+  parse_feedback?: CvParseFeedback;
+  parse_tier?: ParseTier;
+  core_field_analysis?: CoreFieldAnalysis[];
+  diagnostics?: CvParseDiagnostics;
   raw_response: unknown;
   parsed_profile_empty: boolean;
   warning?: string;
   reason?: string;
 };
+
+const DEBUG_PREFIX = "[cv-parse-debug]";
+const CV_PARSE_DIAG = "[CV_PARSE_DIAG]";
+
+/**
+ * Counts fields that look genuinely filled from the parser (before onboarding placeholders).
+ * Used to decide honest empty vs partial vs success messaging.
+ */
+export function countMeaningfulParsedFields(parsed: ParsedCandidateProfile): number {
+  return countMeaningfulProfileSignals(parsed);
+}
 
 function toNaturalCase(value: string) {
   const trimmed = value.trim();
@@ -84,12 +112,35 @@ function inferSeniorityFromYears(yearsExperience: string) {
   return "unknown";
 }
 
-/**
- * Client entry point for server-side CV parsing.
- */
-export async function parseCandidateProfileFromCv(file: File): Promise<ParseResponse> {
-  const formData = new FormData();
-  formData.append("cv", file);
+async function fetchAndMapCvParse(
+  formData: FormData,
+  logContext: { mode: "file" | "paste"; file?: File; textLength?: number },
+): Promise<ParseResponse> {
+  if (logContext.mode === "file" && logContext.file) {
+    console.info(DEBUG_PREFIX, "client: upload", {
+      name: logContext.file.name,
+      type: logContext.file.type,
+      size: logContext.file.size,
+    });
+    console.info(CV_PARSE_DIAG, {
+      step: "client_file_attached",
+      formField: "cv",
+      fileName: logContext.file.name,
+      fileType: logContext.file.type,
+      fileSize: logContext.file.size,
+      endpoint: "/api/candidate/parse-cv",
+    });
+  } else {
+    console.info(DEBUG_PREFIX, "client: pasted text", {
+      length: logContext.textLength ?? 0,
+    });
+    console.info(CV_PARSE_DIAG, {
+      step: "client_pasted_text_attached",
+      formField: "pasted_text",
+      charLength: logContext.textLength ?? 0,
+      endpoint: "/api/candidate/parse-cv",
+    });
+  }
 
   const response = await fetch("/api/candidate/parse-cv", {
     method: "POST",
@@ -104,17 +155,49 @@ export async function parseCandidateProfileFromCv(file: File): Promise<ParseResp
       extracted_characters?: number;
       scanned_pdf_fallback_attempted?: boolean;
       scanned_pdf_fallback_used?: boolean;
+      pdfjs_fallback_attempted?: boolean;
+      pdfjs_fallback_used?: boolean;
+      ocr_attempted?: boolean;
+      ocr_used?: boolean;
     };
+    parse_feedback?: CvParseFeedback;
+    parse_tier?: ParseTier;
+    core_field_analysis?: CoreFieldAnalysis[];
+    diagnostics?: CvParseDiagnostics;
     error?: string;
     warning?: string;
     reason?: string;
   };
-  console.info("[onboarding/cvParser] raw /api/candidate/parse-cv response", {
+  console.info(DEBUG_PREFIX, "client: raw API JSON", {
     status: response.status,
-    payload,
+    success: payload.success,
+    warning: payload.warning,
+    reason: payload.reason,
+    error: payload.error,
+    meta: payload.meta,
+    parsed_profile: payload.parsed_profile,
+    data: payload.data,
+  });
+
+  console.info(CV_PARSE_DIAG, {
+    step: "client_response_received",
+    httpStatus: response.status,
+    success: payload.success,
+    apiError: payload.error ?? null,
+    warning: payload.warning ?? null,
+    reason: payload.reason ?? null,
+    extractedChars: payload.meta?.extracted_characters ?? null,
+    parse_feedback: payload.parse_feedback ?? null,
+    diagnostics: payload.diagnostics ?? null,
   });
 
   if (!response.ok) {
+    console.warn(CV_PARSE_DIAG, {
+      step: "client_http_error_throws",
+      httpStatus: response.status,
+      error: payload.error,
+      reason: payload.reason,
+    });
     const base = payload.error ?? "No pudimos analizar tu CV en este momento.";
     throw new Error(base);
   }
@@ -131,11 +214,31 @@ export async function parseCandidateProfileFromCv(file: File): Promise<ParseResp
       ? value
       : "";
 
+  const profileYearsNum =
+    typeof parsedProfile.years_experience === "number" && Number.isFinite(parsedProfile.years_experience)
+      ? Math.max(0, Math.round(parsedProfile.years_experience))
+      : NaN;
+  const fallbackYearsRaw = safeString(parsedFallback.years_experience);
+  const fallbackYearsNum = Number(fallbackYearsRaw.replace(/\D/g, ""));
+  let mergedYearsExperience: string;
+  if (profileYearsNum > 0) {
+    mergedYearsExperience = String(profileYearsNum);
+  } else if (Number.isFinite(fallbackYearsNum) && fallbackYearsNum > 0) {
+    mergedYearsExperience = String(fallbackYearsNum);
+  } else if (fallbackYearsRaw.trim()) {
+    mergedYearsExperience = fallbackYearsRaw.trim();
+  } else {
+    mergedYearsExperience = "";
+  }
+
   const mappedFromProfile: ParsedCandidateProfile = {
     full_name: safeString(parsedProfile.full_name) || safeString(parsedFallback.full_name),
     email: safeString(parsedProfile.email) || safeString(parsedFallback.email),
     phone: safeString(parsedProfile.phone) || safeString(parsedFallback.phone),
-    whatsapp: safeString(parsedFallback.whatsapp) || safeString(parsedProfile.phone),
+    whatsapp:
+      safeString(parsedFallback.whatsapp) ||
+      safeString(parsedFallback.phone) ||
+      safeString(parsedProfile.phone),
     location: safeString(parsedProfile.location) || safeString(parsedFallback.location),
     city: safeString(parsedFallback.city) || safeString(parsedProfile.location),
     current_title:
@@ -151,16 +254,15 @@ export async function parseCandidateProfileFromCv(file: File): Promise<ParseResp
       parsedProfile.seniority === "unknown"
         ? parsedProfile.seniority
         : "",
-    years_experience:
-      typeof parsedProfile.years_experience === "number" && Number.isFinite(parsedProfile.years_experience)
-        ? String(Math.max(0, Math.round(parsedProfile.years_experience)))
-        : safeString(parsedFallback.years_experience),
+    years_experience: mergedYearsExperience,
     skills:
       safeList(parsedProfile.skills).join(", ") || safeString(parsedFallback.skills),
     tools:
       safeList(parsedProfile.tools).join(", ") || safeString(parsedFallback.tools),
     industries:
       safeList(parsedProfile.industries).join(", ") || safeString(parsedFallback.industries),
+    specializations:
+      safeList(parsedProfile.specializations).join(", ") || safeString(parsedFallback.specializations),
     languages:
       safeList(parsedProfile.languages).join(", ") || safeString(parsedFallback.languages),
     education:
@@ -187,7 +289,44 @@ export async function parseCandidateProfileFromCv(file: File): Promise<ParseResp
     mappedFromProfile.seniority = inferSeniorityFromYears(mappedFromProfile.years_experience);
   }
 
-  console.info("[onboarding/cvParser] mapped parsed data", mappedFromProfile);
+  const meaningfulCount = countMeaningfulParsedFields(mappedFromProfile);
+  const dataKeysPresent = Object.entries(parsedFallback).filter(
+    ([k, v]) =>
+      k !== "cv_file" &&
+      typeof v === "string" &&
+      String(v).trim().length > 0,
+  ).length;
+  console.info(CV_PARSE_DIAG, {
+    step: "onboarding_mapped_state",
+    mappedForOnboarding: mappedFromProfile,
+    meaningfulFieldCount: meaningfulCount,
+  });
+  console.info(CV_PARSE_DIAG, {
+    step: "client_mapping_complete",
+    meaningfulFieldCount: meaningfulCount,
+    nonEmptyDataStringFields: dataKeysPresent,
+    diagnosis:
+      meaningfulCount >= 3
+        ? "mapping_ok_profile_usable"
+        : meaningfulCount > 0
+          ? "mapping_partial_sparse_data"
+          : dataKeysPresent === 0
+            ? "likely_parser_or_extraction_empty_check_server_logs"
+            : "mapping_or_validation_stripped_fields_check_role_rules",
+  });
+  console.info(DEBUG_PREFIX, "client: mapped profile + counts", {
+    mappedFromProfile,
+    meaningfulFieldCount: meaningfulCount,
+    parsed_profile_empty_flag: !(
+      safeString(parsedProfile.full_name) ||
+      safeString(parsedProfile.email) ||
+      safeString(parsedProfile.phone) ||
+      safeString(parsedProfile.location) ||
+      safeString(parsedProfile.current_title) ||
+      safeString(parsedProfile.target_role) ||
+      safeList(parsedProfile.skills).length
+    ),
+  });
 
   const parsedProfileEmpty = !(
     safeString(parsedProfile.full_name) ||
@@ -203,10 +342,35 @@ export async function parseCandidateProfileFromCv(file: File): Promise<ParseResp
     data: mappedFromProfile,
     parsed_profile: parsedProfile,
     meta: payload.meta,
+    parse_feedback: payload.parse_feedback,
+    parse_tier: payload.parse_tier,
+    core_field_analysis: payload.core_field_analysis,
+    diagnostics: payload.diagnostics,
     raw_response: payload,
     parsed_profile_empty: parsedProfileEmpty,
     warning: payload.warning,
     reason: payload.reason,
   };
+}
+
+/**
+ * Client entry point for server-side CV parsing (uploaded file).
+ */
+export async function parseCandidateProfileFromCv(file: File): Promise<ParseResponse> {
+  const formData = new FormData();
+  formData.append("cv", file);
+  return fetchAndMapCvParse(formData, { mode: "file", file });
+}
+
+/**
+ * Same pipeline as file upload: heuristics + OpenAI structured parse on the server.
+ */
+export async function parseCandidateProfileFromPastedText(text: string): Promise<ParseResponse> {
+  const formData = new FormData();
+  formData.append("pasted_text", text);
+  return fetchAndMapCvParse(formData, {
+    mode: "paste",
+    textLength: text.length,
+  });
 }
 
