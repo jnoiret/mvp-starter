@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requireRecruiterFeatureApi } from "@/lib/auth/apiRbac";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 type CreateRecruiterJobPayload = {
   job_title: string;
@@ -32,12 +33,35 @@ function asSeniority(
 }
 
 export async function POST(request: Request) {
+  const isDev = process.env.NODE_ENV === "development";
+  let payload: Partial<CreateRecruiterJobPayload> | null = null;
   try {
     const auth = await requireRecruiterFeatureApi();
     if (auth instanceof NextResponse) return auth;
     const supabase = auth.supabase;
 
-    const payload = (await request.json()) as Partial<CreateRecruiterJobPayload>;
+    console.info("[api/recruiter/jobs] auth ok", {
+      userId: auth.userId,
+      email: auth.email,
+      dbRole: auth.dbRole,
+      effectiveRole: auth.effectiveRole,
+    });
+
+    try {
+      payload = (await request.json()) as Partial<CreateRecruiterJobPayload>;
+    } catch (parseErr) {
+      const reason =
+        parseErr instanceof Error ? `${parseErr.name}: ${parseErr.message}` : String(parseErr);
+      console.warn("[api/recruiter/jobs] invalid JSON body", { reason });
+      return NextResponse.json(
+        { success: false, error: "Solicitud inválida: JSON incorrecto." },
+        { status: 400 },
+      );
+    }
+
+    console.info("[api/recruiter/jobs] request body", {
+      payload,
+    });
 
     const job_title = asString(payload.job_title);
     const company = asString(payload.company);
@@ -67,7 +91,7 @@ export async function POST(request: Request) {
 
     console.info("[api/recruiter/jobs] insert start", {
       target_table: targetTable,
-      payload: insertPayload,
+      insert_payload: insertPayload,
     });
 
     const { data, error } = await supabase
@@ -79,7 +103,7 @@ export async function POST(request: Request) {
     if (error) {
       console.error("[api/recruiter/jobs] insert failed", {
         target_table: targetTable,
-        payload: insertPayload,
+        insert_payload: insertPayload,
         message: error.message,
         details: error.details,
         hint: error.hint,
@@ -88,8 +112,19 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           success: false,
-          error: "No se pudo crear la vacante en este momento.",
-          reason: error.message,
+          error: isDev
+            ? `No se pudo crear la vacante: ${error.message}`
+            : "No se pudo crear la vacante en este momento.",
+          ...(isDev
+            ? {
+                debug: {
+                  message: error.message,
+                  details: error.details,
+                  hint: error.hint,
+                  code: error.code,
+                },
+              }
+            : null),
         },
         { status: 500 }
       );
@@ -106,13 +141,20 @@ export async function POST(request: Request) {
       id: String(data?.id ?? ""),
     });
   } catch (err) {
-    const reason = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-    console.error("[api/recruiter/jobs] unexpected error", { reason });
+    const reason =
+      err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    console.error("[api/recruiter/jobs] unexpected error", {
+      reason,
+      stack: err instanceof Error ? err.stack : null,
+      payload,
+    });
     return NextResponse.json(
       {
         success: false,
-        error: "Error inesperado al crear la vacante.",
-        reason,
+        error: isDev
+          ? `Error inesperado al crear la vacante: ${reason}`
+          : "Error inesperado al crear la vacante.",
+        ...(isDev ? { debug: { reason } } : null),
       },
       { status: 500 }
     );

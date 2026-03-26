@@ -44,9 +44,18 @@ export default function RecruiterNewJobPage() {
         success?: boolean;
         id?: string;
         error?: string;
+        debug?: { message?: string; details?: string; hint?: string; code?: string; reason?: string };
       };
       if (!res.ok || !data.success || !data.id) {
-        setError(data.error ?? "No se pudo crear la vacante.");
+        const fallback = "No se pudo crear la vacante.";
+        const detail =
+          data.error ||
+          data.debug?.message ||
+          data.debug?.details ||
+          data.debug?.hint ||
+          data.debug?.reason ||
+          null;
+        setError(detail ?? fallback);
         return;
       }
       router.push(`/recruiter/jobs/${data.id}/matches`);
