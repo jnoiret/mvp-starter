@@ -1,9 +1,7 @@
 import { redirect } from "next/navigation";
 import { HomeLanding } from "@/components/marketing/HomeLanding";
-import {
-  effectiveProfileRole,
-  isAllowedAdminEmail,
-} from "@/lib/admin/adminAllowlist";
+import { isAllowedAdminEmail } from "@/lib/admin/adminAllowlist";
+import { resolveAppRole } from "@/lib/auth/roles";
 import { getCurrentProfile } from "@/lib/auth/getCurrentProfile";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +14,7 @@ export default async function Home() {
   }
 
   const email = user.email ?? profile?.email ?? null;
-  const role = effectiveProfileRole(email, profile?.role);
+  const role = resolveAppRole(email, profile?.role);
 
   if (!role) {
     redirect("/auth/redirect");

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getSupabaseServerClient } from "@/lib/supabase/server";
+import { requireRecruiterFeatureApi } from "@/lib/auth/apiRbac";
 
 export const runtime = "nodejs";
 
@@ -30,7 +30,9 @@ function asStatus(value: unknown): ShortlistStatus | null {
 
 export async function GET() {
   try {
-    const supabase = await getSupabaseServerClient();
+    const auth = await requireRecruiterFeatureApi();
+    if (auth instanceof NextResponse) return auth;
+    const supabase = auth.supabase;
     const shortlistTable = "recruiter_shortlist";
     console.info("[api/recruiter/shortlist][GET] fetch start", {
       target_table: shortlistTable,
@@ -173,6 +175,10 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireRecruiterFeatureApi();
+    if (auth instanceof NextResponse) return auth;
+    const supabase = auth.supabase;
+
     const payload = (await request.json()) as Partial<ShortlistRecord>;
 
     const candidate_id = asString(payload.candidate_id);
@@ -190,7 +196,6 @@ export async function POST(request: Request) {
       );
     }
 
-    const supabase = await getSupabaseServerClient();
     const targetTable = "recruiter_shortlist";
     const upsertPayload = {
       candidate_id,

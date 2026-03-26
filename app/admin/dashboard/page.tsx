@@ -10,10 +10,9 @@ import { parseDashboardApiResponse } from "@/lib/admin/parseDashboardResponse";
 import { getSupabaseBrowserClient } from "@/lib/supabase";
 import { AdminDashboardView } from "./AdminDashboardView";
 
-/** Simulated admin identity in dev when Supabase Auth is not wired yet. */
-const DEV_FALLBACK_ADMIN_EMAIL = "joel.sales85@gmail.com";
-
 const isDevelopment = process.env.NODE_ENV === "development";
+const devAuthBypassEnabled =
+  isDevelopment && process.env.NEXT_PUBLIC_DEV_AUTH_BYPASS === "true";
 
 type Phase =
   | { kind: "checking" }
@@ -36,7 +35,7 @@ export default function AdminDashboardPage() {
     let cancelled = false;
 
     async function run() {
-      if (isDevelopment) {
+      if (devAuthBypassEnabled) {
         setPhase({ kind: "loading_data" });
         const res = await fetch("/api/admin/dashboard-data", {
           credentials: "same-origin",
@@ -76,7 +75,7 @@ export default function AdminDashboardPage() {
           return;
         }
 
-        const userEmail = DEV_FALLBACK_ADMIN_EMAIL;
+        const userEmail = "joel.sales85@gmail.com";
         setPhase({
           kind: "ready",
           result: parsed.payload.result,

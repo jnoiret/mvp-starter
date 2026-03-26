@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getSupabaseServerClient } from "@/lib/supabase/server";
+import { requireCandidateFeatureApi } from "@/lib/auth/apiRbac";
 
 export const runtime = "nodejs";
 
@@ -66,6 +66,10 @@ function buildInputFromFormData(formData: FormData): SaveProfileInput | null {
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireCandidateFeatureApi();
+    if (auth instanceof NextResponse) return auth;
+    const supabase = auth.supabase;
+
     const formData = await request.formData();
     const existingCvUrl = parseStringField(formData.get("cv_url"));
 
@@ -76,8 +80,6 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
-
-    const supabase = await getSupabaseServerClient();
     const cvUrl = existingCvUrl;
 
     // Insert strictly and only table fields.

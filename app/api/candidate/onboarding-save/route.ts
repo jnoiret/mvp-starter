@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getSupabaseServerClient } from "@/lib/supabase/server";
+import { requireCandidateLifecycleApi } from "@/lib/auth/apiRbac";
 import {
   buildCandidateProfilesUpsertRow,
   CANDIDATE_PROFILES_WRITABLE_KEYS,
@@ -41,33 +41,10 @@ export async function POST(request: Request) {
   let rawBody: unknown = null;
 
   try {
-    const supabase = await getSupabaseServerClient();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const gate = await requireCandidateLifecycleApi();
+    if (gate instanceof NextResponse) return gate;
 
-    if (authError) {
-      console.warn(LOG_PREFIX, "auth.getUser error", {
-        message: authError.message,
-        name: authError.name,
-      });
-    }
-
-    if (!user?.id) {
-      console.info(LOG_PREFIX, "no session — client should keep draft until login", {
-        authError: authError?.message ?? null,
-      });
-      return NextResponse.json(
-        {
-          success: false,
-          error:
-            "Necesitas iniciar sesión para guardar el perfil en el servidor. Tu borrador sigue en este dispositivo hasta que completes el acceso.",
-          code: "NOT_AUTHENTICATED",
-        },
-        { status: 401 },
-      );
-    }
+    const { supabase, userId, email: sessionEmailFromAuth } = gate;
 
     try {
       rawBody = await request.json();
@@ -108,15 +85,15 @@ export async function POST(request: Request) {
       );
     }
 
-    const sessionEmail = user.email?.trim() || row.email;
-    const upsertRow = buildCandidateProfilesUpsertRow(user.id, {
+    const sessionEmail = sessionEmailFromAuth?.trim() || row.email;
+    const upsertRow = buildCandidateProfilesUpsertRow(userId, {
       ...row,
       email: sessionEmail,
     });
 
     console.info(LOG_PREFIX, "pre-db", {
-      userId: user.id,
-      userEmail: user.email ?? null,
+      userId,
+      userEmail: sessionEmailFromAuth ?? null,
       writableKeys: [...CANDIDATE_PROFILES_WRITABLE_KEYS],
       parsedFields: {
         ...upsertRow,
@@ -129,7 +106,7 @@ export async function POST(request: Request) {
     try {
       const { error: profileRoleError } = await supabase.from("profiles").upsert(
         {
-          id: user.id,
+          id: userId,
           email: sessionEmail,
           role: "candidate",
         },
@@ -173,13 +150,13 @@ export async function POST(request: Request) {
         );
       }
 
-      const savedId = upsertResult.data?.id ?? user.id;
+      const savedId = upsertResult.data?.id ?? userId;
 
       if (!upsertResult.data?.id) {
         console.warn(
           LOG_PREFIX,
           "upsert ok but select returned no row (check RLS SELECT policies); assuming id = auth user",
-          { userId: user.id },
+          { userId },
         );
       }
 

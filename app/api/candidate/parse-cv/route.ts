@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireCandidateLifecycleApi } from "@/lib/auth/apiRbac";
 import mammoth from "mammoth";
 import type { WorkMode } from "@/components/candidate/onboarding/types";
 import { extractPdfTextWithSmartFallbacks } from "@/lib/cv/extractPdfWithFallbacks";
@@ -609,6 +610,9 @@ async function buildParseResponseFromExtractedText(
 
 export async function POST(request: Request) {
   try {
+    const lifecycleGate = await requireCandidateLifecycleApi();
+    if (lifecycleGate instanceof NextResponse) return lifecycleGate;
+
     const formData = await request.formData();
     const file = formData.get("cv");
     const pastedRaw = formData.get("pasted_text");

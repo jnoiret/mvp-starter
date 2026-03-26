@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { apiUnauthorized } from "@/lib/auth/apiRbac";
 import { syncAllowlistedAdminProfileForUser } from "@/lib/auth/syncAllowlistedAdminProfile";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -16,10 +17,7 @@ export async function POST() {
   } = await supabase.auth.getUser();
 
   if (authError || !user?.id) {
-    return NextResponse.json(
-      { success: false, error: "not_authenticated" },
-      { status: 401 },
-    );
+    return apiUnauthorized();
   }
 
   const email = user.email?.trim();

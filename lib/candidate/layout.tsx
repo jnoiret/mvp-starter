@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
-import { effectiveProfileRole } from "@/lib/admin/adminAllowlist";
-import { isCandidateAreaAllowed } from "@/lib/auth/getCurrentProfile";
+import {
+  canAccessCandidateRoutes,
+  resolveAppRole,
+} from "@/lib/auth/roles";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
 
 export default async function CandidateLayout({
@@ -28,8 +30,8 @@ export default async function CandidateLayout({
     redirect("/auth/redirect");
   }
 
-  const role = effectiveProfileRole(user.email, profile?.role);
-  if (!isCandidateAreaAllowed(role)) {
+  const role = resolveAppRole(user.email, profile?.role);
+  if (!canAccessCandidateRoutes(role)) {
     redirect("/auth/redirect");
   }
 

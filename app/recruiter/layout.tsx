@@ -1,11 +1,11 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { effectiveProfileRole } from "@/lib/admin/adminAllowlist";
+import { getCurrentProfile } from "@/lib/auth/getCurrentProfile";
 import {
-  getCurrentProfile,
-  isRecruiterAreaAllowed,
-} from "@/lib/auth/getCurrentProfile";
+  canAccessRecruiterRoutes,
+  resolveAppRole,
+} from "@/lib/auth/roles";
 
 export const dynamic = "force-dynamic";
 
@@ -20,8 +20,8 @@ export default async function RecruiterLayout({
     redirect("/login");
   }
 
-  const role = effectiveProfileRole(user.email ?? profile?.email, profile?.role);
-  if (!isRecruiterAreaAllowed(role)) {
+  const role = resolveAppRole(user.email ?? profile?.email, profile?.role);
+  if (!canAccessRecruiterRoutes(role)) {
     redirect("/auth/redirect");
   }
 

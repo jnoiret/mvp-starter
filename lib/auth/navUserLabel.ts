@@ -3,7 +3,7 @@
  */
 
 import type { SupabaseClient, User } from "@supabase/supabase-js";
-import { isAllowedAdminEmail } from "@/lib/admin/adminAllowlist";
+import { resolveAppRole } from "@/lib/auth/roles";
 
 type ProfilesRow = { role: string; email: string | null };
 
@@ -24,8 +24,7 @@ export async function fetchNavUserDisplayContext(
 ): Promise<{ email: string | null; role: string | null; fullName: string | null }> {
   const email = user.email?.trim() || profileRow?.email?.trim() || null;
   const dbRole = typeof profileRow?.role === "string" ? profileRow.role : null;
-  const role =
-    isAllowedAdminEmail(email) ? "admin" : dbRole;
+  const role = resolveAppRole(email, dbRole);
 
   let fullName: string | null = null;
 

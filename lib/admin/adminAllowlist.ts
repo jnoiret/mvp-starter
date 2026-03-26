@@ -8,6 +8,21 @@ export const ADMIN_EMAILS = [
 
 const VALID_APP_ROLES = new Set(["candidate", "recruiter", "admin"]);
 
+/** Roles admins may assign in `public.profiles.role`. */
+export const MANAGEABLE_PROFILE_ROLES = [
+  "candidate",
+  "recruiter",
+  "admin",
+] as const;
+
+export type ManageableProfileRole = (typeof MANAGEABLE_PROFILE_ROLES)[number];
+
+export function isManageableProfileRole(
+  value: string,
+): value is ManageableProfileRole {
+  return (MANAGEABLE_PROFILE_ROLES as readonly string[]).includes(value);
+}
+
 function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
 }

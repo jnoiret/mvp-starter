@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getSupabaseServerClient } from "@/lib/supabase/server";
+import { requireCandidateLifecycleApi } from "@/lib/auth/apiRbac";
 import { buildCandidateProfilesUpsertRow } from "@/lib/candidate/candidateProfilesWritePayload";
 import {
   validateOnboardingProfilePayload,
@@ -13,13 +13,11 @@ export const runtime = "nodejs";
  */
 export async function POST(request: Request) {
   try {
-    const supabase = await getSupabaseServerClient();
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
+    const gate = await requireCandidateLifecycleApi();
+    if (gate instanceof NextResponse) return gate;
 
-    if (authError || !user?.email?.trim()) {
+    const { supabase, userId, email: authEmail } = gate;
+    if (!authEmail?.trim()) {
       return NextResponse.json(
         { success: false, error: "Sesión no válida." },
         { status: 401 },
@@ -28,7 +26,7 @@ export async function POST(request: Request) {
 
     const body = (await request.json()) as Record<string, unknown>;
 
-    const sessionEmail = user.email!.trim();
+    const sessionEmail = authEmail.trim();
     const row: OnboardingProfilePayload = {
       full_name: String(body.full_name ?? "").trim(),
       email: sessionEmail,
@@ -54,7 +52,7 @@ export async function POST(request: Request) {
 
     const { error: profileUpsertError } = await supabase.from("profiles").upsert(
       {
-        id: user.id,
+        id: userId,
         email: sessionEmail,
         role: "candidate",
       },
@@ -73,7 +71,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const upsertRow = buildCandidateProfilesUpsertRow(user.id, {
+    const upsertRow = buildCandidateProfilesUpsertRow(userId, {
       ...row,
       email: sessionEmail,
     });
@@ -103,16 +101,16 @@ export async function POST(request: Request) {
       );
     }
 
-    const savedId = upsertResult.data?.id ?? user.id;
+    const savedId = upsertResult.data?.id ?? userId;
     if (!upsertResult.data?.id) {
       console.warn(
         "[complete-pending-onboarding] upsert ok but select returned no row (check RLS)",
-        { userId: user.id },
+        { userId },
       );
     }
 
     return NextResponse.json(
-      { success: true, data: { id: savedId ?? user.id } },
+      { success: true, data: { id: savedId ?? userId } },
       { status: 200 },
     );
   } catch (err) {

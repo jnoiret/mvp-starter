@@ -233,6 +233,19 @@ export function AppNav() {
               >
                 Perfiles
               </Link>
+              <span className="text-zinc-300" aria-hidden>
+                ·
+              </span>
+              <Link
+                href="/admin/users"
+                className={`rounded-md px-2 py-1 transition hover:bg-zinc-100 hover:text-[#0F172A] ${
+                  pathname.startsWith("/admin/users")
+                    ? "font-medium text-[#0F172A]"
+                    : ""
+                }`}
+              >
+                Usuarios
+              </Link>
             </nav>
           ) : null}
           {!loading && signedIn && showRecruiterStrip ? (
@@ -457,6 +470,16 @@ export function AppNav() {
                           onClick={() => setMenuOpen(false)}
                         >
                           Lista de perfiles
+                        </Link>
+                        <Link
+                          href="/admin/users"
+                          role="menuitem"
+                          className={menuLinkClass(
+                            pathname.startsWith("/admin/users"),
+                          )}
+                          onClick={() => setMenuOpen(false)}
+                        >
+                          Gestionar usuarios
                         </Link>
                       </>
                     ) : null}

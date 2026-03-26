@@ -64,6 +64,12 @@ export default async function AdminLayout({ children }: { children: ReactNode })
           >
             Perfiles
           </Link>
+          <Link
+            href="/admin/users"
+            className="rounded-full border border-zinc-200 bg-white px-4 py-2 font-medium text-[#0F172A] shadow-sm hover:border-zinc-300"
+          >
+            Usuarios
+          </Link>
         </nav>
       </header>
       {children}

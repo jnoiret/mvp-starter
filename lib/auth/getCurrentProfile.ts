@@ -1,5 +1,7 @@
 import type { User } from "@supabase/supabase-js";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
+import { canAccessCandidateRoutes, canAccessRecruiterRoutes } from "@/lib/auth/roles";
+import type { AppRole } from "@/lib/auth/roles";
 
 export type ProfileRole = "candidate" | "recruiter" | "admin";
 
@@ -45,10 +47,15 @@ export async function getCurrentProfile(): Promise<CurrentProfileResult> {
   };
 }
 
-export function isCandidateAreaAllowed(role: string | null | undefined): boolean {
-  return role === "candidate" || role === "admin";
+/** Pass effective role from {@link resolveAppRole} (or equivalent string). */
+export function isCandidateAreaAllowed(
+  role: string | null | undefined | AppRole,
+): boolean {
+  return canAccessCandidateRoutes((role as AppRole) ?? null);
 }
 
-export function isRecruiterAreaAllowed(role: string | null | undefined): boolean {
-  return role === "recruiter" || role === "admin";
+export function isRecruiterAreaAllowed(
+  role: string | null | undefined | AppRole,
+): boolean {
+  return canAccessRecruiterRoutes((role as AppRole) ?? null);
 }

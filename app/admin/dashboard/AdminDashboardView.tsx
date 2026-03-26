@@ -127,6 +127,24 @@ function DashboardContent({ data }: { data: DashboardMetrics }) {
         </div>
       ) : null}
 
+      <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-zinc-200 bg-gradient-to-br from-white to-zinc-50/80 p-5 shadow-sm">
+        <div>
+          <p className="text-sm font-semibold text-[#0F172A]">
+            Usuarios y permisos
+          </p>
+          <p className="mt-0.5 text-xs text-zinc-600">
+            Asigna roles en la tabla{" "}
+            <code className="rounded bg-white/80 px-1 text-[11px]">profiles</code>
+          </p>
+        </div>
+        <Link
+          href="/admin/users"
+          className="inline-flex items-center justify-center rounded-full bg-[#0F172A] px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-800"
+        >
+          Gestionar usuarios
+        </Link>
+      </div>
+
       {!hasAnyActivity ? (
         <p className="rounded-xl border border-dashed border-zinc-200 bg-zinc-50/90 px-4 py-6 text-center text-sm text-zinc-600">
           Aún no hay actividad registrada en las tablas. Cuando haya candidatos,
@@ -386,6 +404,9 @@ export function AdminDashboardView({
   result: AdminDashboardLoadResult;
   devSimulatedEmail?: string;
 }) {
+  const showDevBypassBanner =
+    process.env.NODE_ENV === "development" && Boolean(devSimulatedEmail);
+
   return (
     <div className="mx-auto w-full max-w-7xl px-6 md:px-8 pb-14 pt-4">
       <div className="flex flex-col gap-8">
@@ -401,7 +422,7 @@ export function AdminDashboardView({
               Salud del producto, actividad y embudo a partir de tablas reales en
               Supabase (sin datos de demostración).
             </p>
-            {devSimulatedEmail ? (
+            {showDevBypassBanner ? (
               <p className="mt-2 inline-block rounded-lg border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-950">
                 <span className="font-semibold">Modo desarrollo:</span> acceso sin auth.
                 Usuario simulado: {devSimulatedEmail}

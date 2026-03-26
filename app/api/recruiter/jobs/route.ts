@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getSupabaseServerClient } from "@/lib/supabase/server";
+import { requireRecruiterFeatureApi } from "@/lib/auth/apiRbac";
 
 export const runtime = "nodejs";
 
@@ -33,6 +33,10 @@ function asSeniority(
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireRecruiterFeatureApi();
+    if (auth instanceof NextResponse) return auth;
+    const supabase = auth.supabase;
+
     const payload = (await request.json()) as Partial<CreateRecruiterJobPayload>;
 
     const job_title = asString(payload.job_title);
@@ -52,7 +56,6 @@ export async function POST(request: Request) {
       );
     }
 
-    const supabase = await getSupabaseServerClient();
     const targetTable = "recruiter_jobs";
     const insertPayload = {
       job_title,

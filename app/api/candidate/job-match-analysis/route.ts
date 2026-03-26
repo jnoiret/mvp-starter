@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireCandidateFeatureApi } from "@/lib/auth/apiRbac";
 import {
   generateJobMatchAnalysis,
   type MatchCandidateProfile,
@@ -31,6 +32,9 @@ function asNumber(value: unknown) {
 
 export async function POST(request: Request) {
   try {
+    const auth = await requireCandidateFeatureApi();
+    if (auth instanceof NextResponse) return auth;
+
     const payload = (await request.json()) as RequestPayload;
     const rawCandidate = payload.candidate_profile ?? {};
     const rawJob = payload.job_listing ?? {};

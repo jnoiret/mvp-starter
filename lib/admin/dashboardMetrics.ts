@@ -33,7 +33,8 @@ export type DashboardMetrics = {
     id: string;
     candidate_email: string | null;
     job_id: string | null;
-    title: string | null;
+    /** Display title from job_listings / recruiter_jobs, or a safe fallback. */
+    title: string;
     company_name: string | null;
     created_at: string | null;
   }>;
@@ -167,7 +168,7 @@ export async function loadAdminDashboardMetrics(): Promise<
     countExact(supabase, "recruiter_jobs"),
     supabase
       .from("applications")
-      .select("id, candidate_email, job_id, title, company_name, created_at")
+      .select("id, candidate_email, job_id, created_at")
       .eq("status", "applied")
       .order("created_at", { ascending: false })
       .limit(RECENT_LIMIT),
@@ -259,22 +260,109 @@ export async function loadAdminDashboardMetrics(): Promise<
       ? Math.round((applicationsApplied / applicationsSaved) * 1000) / 1000
       : null;
 
-  const recentApplied = asObjectRows<Record<string, unknown>>(
+  const recentAppliedRaw = asObjectRows<Record<string, unknown>>(
     recentAppliedRes.data
-  ).map((row) => ({
-    id: String(row.id ?? ""),
-    candidate_email: isNonEmptyString(row.candidate_email)
-      ? row.candidate_email
-      : null,
-    job_id: row.job_id != null ? String(row.job_id) : null,
-    title: isNonEmptyString(row.title) ? row.title : null,
-    company_name: isNonEmptyString(row.company_name) ? row.company_name : null,
-    created_at: isNonEmptyString(row.created_at) ? row.created_at : null,
-  }));
+  );
 
   if (recentAppliedRes.error) {
     warnings.push(`Actividad postulaciones: ${recentAppliedRes.error.message}`);
   }
+
+  const recentAppliedJobIds = Array.from(
+    new Set(
+      recentAppliedRaw
+        .map((row) => row.job_id)
+        .filter((id) => id != null && String(id))
+        .map((id) => String(id)),
+    ),
+  );
+
+  const jobMetaById = new Map<
+    string,
+    { title: string | null; company_name: string | null }
+  >();
+
+  if (recentAppliedJobIds.length > 0) {
+    const { data: listingRows, error: recentListingsError } = await supabase
+      .from("job_listings")
+      .select("id, title, company_name")
+      .in("id", recentAppliedJobIds);
+
+    if (recentListingsError) {
+      warnings.push(
+        `Títulos de postulaciones recientes (job_listings): ${recentListingsError.message}`,
+      );
+    } else {
+      for (const row of asObjectRows<Record<string, unknown>>(listingRows)) {
+        const id = String(row.id ?? "");
+        if (!id) continue;
+        jobMetaById.set(id, {
+          title: isNonEmptyString(row.title) ? row.title : null,
+          company_name: isNonEmptyString(row.company_name)
+            ? row.company_name
+            : null,
+        });
+      }
+    }
+
+    const missingForRecruiter = recentAppliedJobIds.filter(
+      (id) => !jobMetaById.has(id),
+    );
+    if (missingForRecruiter.length > 0) {
+      const { data: recruiterRows, error: recruiterErr } = await supabase
+        .from("recruiter_jobs")
+        .select("id, job_title, company")
+        .in("id", missingForRecruiter);
+
+      if (recruiterErr) {
+        warnings.push(
+          `Títulos de postulaciones recientes (recruiter_jobs): ${recruiterErr.message}`,
+        );
+      } else {
+        for (const row of asObjectRows<Record<string, unknown>>(
+          recruiterRows
+        )) {
+          const id = String(row.id ?? "");
+          if (!id || jobMetaById.has(id)) continue;
+          jobMetaById.set(id, {
+            title: isNonEmptyString(row.job_title) ? row.job_title : null,
+            company_name: isNonEmptyString(row.company) ? row.company : null,
+          });
+        }
+      }
+    }
+  }
+
+  const recentApplied = recentAppliedRaw.map((row) => {
+    const job_id = row.job_id != null ? String(row.job_id) : null;
+    const meta = job_id ? jobMetaById.get(job_id) : undefined;
+
+    let title: string;
+    let company_name: string | null;
+    if (!job_id) {
+      title = "Vacante";
+      company_name = null;
+    } else if (!meta) {
+      title = "Vacante eliminada";
+      company_name = null;
+    } else {
+      const t = meta.title?.trim() ?? "";
+      title = t.length > 0 ? t : "Vacante";
+      const c = meta.company_name?.trim() ?? "";
+      company_name = c.length > 0 ? c : null;
+    }
+
+    return {
+      id: String(row.id ?? ""),
+      candidate_email: isNonEmptyString(row.candidate_email)
+        ? row.candidate_email
+        : null,
+      job_id,
+      title,
+      company_name,
+      created_at: isNonEmptyString(row.created_at) ? row.created_at : null,
+    };
+  });
 
   const recentRecruiterJobs = asObjectRows<Record<string, unknown>>(
     recentJobsRes.data

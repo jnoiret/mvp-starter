@@ -36,8 +36,11 @@ export async function GET(request: Request) {
   console.log("[admin dashboard api] route hit");
 
   try {
-    // DEV: bypass auth
-    if (process.env.NODE_ENV === "development") {
+    // DEV: bypass auth (explicit opt-in)
+    if (
+      process.env.NODE_ENV === "development" &&
+      process.env.DEV_AUTH_BYPASS === "true"
+    ) {
       const result = await loadAdminDashboardMetrics();
       return jsonSuccess(result);
     }
