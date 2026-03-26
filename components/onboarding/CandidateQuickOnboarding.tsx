@@ -125,6 +125,8 @@ function parsedToForm(
 }
 
 const DEBUG_PREFIX = "[cv-parse-debug]";
+const ONBOARDING_DEBUG_PREFIX = "[onboarding:gate]";
+const IS_DEV = process.env.NODE_ENV !== "production";
 
 /** Minimum filled parser fields to treat CV parse as “we got real data” (honest UX). */
 const MIN_MEANINGFUL_FOR_SUCCESS = 3;
@@ -205,6 +207,12 @@ type Props = {
   defaultName: string;
 };
 
+type GateUiState =
+  | "unauthenticated_email_step"
+  | "authenticated_saving"
+  | "authenticated_save_error"
+  | "completed";
+
 export function CandidateQuickOnboarding({
   variant,
   defaultEmail,
@@ -214,6 +222,7 @@ export function CandidateQuickOnboarding({
   const searchParams = useSearchParams();
   const fileRef = useRef<HTMLInputElement>(null);
   const hydratedRef = useRef(false);
+  const gateAutoAttemptedForUserRef = useRef<string | null>(null);
 
   const [phase, setPhase] = useState<Phase>("cv");
   /** Saved draft detected on load; user must choose resume — we never auto-open the profile step. */
@@ -233,6 +242,9 @@ export function CandidateQuickOnboarding({
   const [parseSucceeded, setParseSucceeded] = useState(false);
   const [otpSent, setOtpSent] = useState(false);
   const [otpLoading, setOtpLoading] = useState(false);
+  const [gateUiState, setGateUiState] = useState<GateUiState>(
+    "unauthenticated_email_step",
+  );
   const [cvEntryMode, setCvEntryMode] = useState<CvEntryMode>("none");
   const [pasteDraft, setPasteDraft] = useState("");
   const [parseRecoveryKind, setParseRecoveryKind] = useState<
@@ -345,8 +357,11 @@ export function CandidateQuickOnboarding({
   useEffect(() => {
     const errQ = searchParams.get("error");
     if (errQ === "guardar") {
+      const reason = searchParams.get("reason")?.trim();
       setError(
-        "No pudimos guardar tu perfil tras iniciar sesión. Revisa los datos y vuelve a enviarte el enlace.",
+        IS_DEV && reason
+          ? `No pudimos guardar tu perfil tras iniciar sesión: ${decodeURIComponent(reason)}`
+          : "No pudimos guardar tu perfil tras iniciar sesión. Revisa los datos y vuelve a enviarte el enlace.",
       );
     }
   }, [searchParams]);
@@ -568,6 +583,91 @@ export function CandidateQuickOnboarding({
     }
   };
 
+  const persistAuthenticatedPendingOnboarding = useCallback(
+    async (sessionEmail: string | null | undefined) => {
+      const merged: FormState = {
+        ...form,
+        email: (sessionEmail?.trim() || gateEmail.trim() || form.email.trim()),
+      };
+      setForm(merged);
+      saveOnboardingDraft(formToDraftPayload(merged, "gate"));
+
+      const completionPayload = {
+        full_name: merged.full_name.trim(),
+        whatsapp: merged.whatsapp.trim(),
+        city: merged.city.trim(),
+        target_role: merged.target_role.trim(),
+        years_experience: Number(onlyDigits(merged.years_experience)),
+        skills: merged.skills.trim(),
+        expected_salary: Number(normalizeMoney(merged.expected_salary)) || 1,
+        work_mode: merged.work_mode,
+        cv_url: "",
+        summary: merged.summary.trim(),
+        industries: "",
+      };
+
+      if (IS_DEV) {
+        console.info(
+          ONBOARDING_DEBUG_PREFIX,
+          "authenticated persistence attempt",
+          {
+            hasDraft: Boolean(loadOnboardingDraft()),
+            completionPayload,
+            sessionEmail: sessionEmail ?? null,
+          },
+        );
+      }
+
+      const completionRes = await fetch("/api/candidate/complete-pending-onboarding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify(completionPayload),
+      });
+
+      let completionJson: {
+        success?: boolean;
+        error?: string;
+        reason?: string;
+        code?: string;
+      } = {};
+      try {
+        completionJson = (await completionRes.json()) as typeof completionJson;
+      } catch {
+        // ignore parse error and rely on status fallback
+      }
+
+      if (IS_DEV) {
+        console.info(ONBOARDING_DEBUG_PREFIX, "authenticated persistence response", {
+          status: completionRes.status,
+          ok: completionRes.ok,
+          completionJson,
+        });
+      }
+
+      if (!completionRes.ok || !completionJson.success) {
+        const reason =
+          completionJson.error ||
+          completionJson.reason ||
+          completionJson.code ||
+          `status_${completionRes.status}`;
+        setError(
+          IS_DEV
+            ? `No se pudo guardar el perfil: ${reason}`
+            : "No pudimos guardar tu perfil. Intenta nuevamente.",
+        );
+        setGateUiState("authenticated_save_error");
+        return;
+      }
+
+      clearOnboardingDraft();
+      markShowFirstJobsAfterOnboarding();
+      setGateUiState("completed");
+      router.replace("/candidate/first-jobs");
+    },
+    [form, gateEmail, router],
+  );
+
   const sendMagicLink = async (e: React.FormEvent) => {
     e.preventDefault();
     const v = validateProfileOnly(form);
@@ -587,8 +687,36 @@ export function CandidateQuickOnboarding({
     setForm(merged);
     saveOnboardingDraft(formToDraftPayload(merged, "gate"));
 
+    if (IS_DEV) {
+      console.info(ONBOARDING_DEBUG_PREFIX, "draft saved before auth flow", {
+        hasDraft: Boolean(loadOnboardingDraft()),
+        draftPayload: formToDraftPayload(merged, "gate"),
+      });
+    }
+
     try {
       const supabase = getSupabaseBrowserClient();
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (session?.user) {
+        if (IS_DEV) {
+          console.info(
+            ONBOARDING_DEBUG_PREFIX,
+            "session already exists, retry persistence without resending magic link",
+            {
+              userId: session.user.id,
+              email: session.user.email ?? null,
+              payload: completionPayload,
+            },
+          );
+        }
+
+        setGateUiState("authenticated_saving");
+        await persistAuthenticatedPendingOnboarding(session.user.email ?? null);
+        return;
+      }
+
       const origin =
         typeof window !== "undefined" ? window.location.origin : "";
       const { error: otpError } = await supabase.auth.signInWithOtp({
@@ -603,6 +731,12 @@ export function CandidateQuickOnboarding({
         );
         return;
       }
+      if (IS_DEV) {
+        console.info(ONBOARDING_DEBUG_PREFIX, "magic link sent", {
+          email: gateEmail.trim(),
+          redirectTo: `${origin}/auth/redirect`,
+        });
+      }
       setOtpSent(true);
     } catch {
       setError("Algo salió mal. Inténtalo de nuevo en un momento.");
@@ -610,6 +744,49 @@ export function CandidateQuickOnboarding({
       setOtpLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!isPublic || phase !== "gate") return;
+    let cancelled = false;
+
+    async function checkSessionAndMaybePersist() {
+      const supabase = getSupabaseBrowserClient();
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (cancelled) return;
+
+      const draft = loadOnboardingDraft();
+      if (IS_DEV) {
+        console.info(ONBOARDING_DEBUG_PREFIX, "gate session check", {
+          hasSession: Boolean(session?.user),
+          sessionUserId: session?.user?.id ?? null,
+          sessionEmail: session?.user?.email ?? null,
+          hasDraft: Boolean(draft),
+          gateUiState,
+        });
+      }
+
+      if (!session?.user) {
+        setGateUiState("unauthenticated_email_step");
+        gateAutoAttemptedForUserRef.current = null;
+        return;
+      }
+
+      if (gateAutoAttemptedForUserRef.current === session.user.id) return;
+      gateAutoAttemptedForUserRef.current = session.user.id;
+      setGateUiState("authenticated_saving");
+      setOtpSent(false);
+      setOtpLoading(false);
+      setError(null);
+      await persistAuthenticatedPendingOnboarding(session.user.email ?? null);
+    }
+
+    void checkSessionAndMaybePersist();
+    return () => {
+      cancelled = true;
+    };
+  }, [gateUiState, isPublic, persistAuthenticatedPendingOnboarding, phase]);
 
   function handleParseRecoveryRetry() {
     setParseRecoveryKind(null);
@@ -855,8 +1032,38 @@ export function CandidateQuickOnboarding({
       {phase === "gate" && isPublic ? (
         <div className="space-y-6">
           {error ? <p className="text-sm text-red-600">{error}</p> : null}
-
-          {otpSent ? (
+          {gateUiState === "authenticated_saving" ? (
+            <div className="space-y-3 rounded-xl border border-zinc-200 bg-zinc-50/70 px-4 py-4">
+              <p className="text-sm font-medium text-zinc-900">Guardando tu perfil...</p>
+              <p className="text-xs text-zinc-600">
+                Ya detectamos tu sesión. Estamos completando tu onboarding automáticamente.
+              </p>
+            </div>
+          ) : gateUiState === "authenticated_save_error" ? (
+            <div className="space-y-4 rounded-xl border border-rose-200 bg-rose-50/80 px-4 py-4">
+              <p className="text-sm font-medium text-rose-900">
+                No pudimos guardar tu perfil. Intenta nuevamente.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setGateUiState("authenticated_saving");
+                  void (async () => {
+                    const supabase = getSupabaseBrowserClient();
+                    const {
+                      data: { session },
+                    } = await supabase.auth.getSession();
+                    await persistAuthenticatedPendingOnboarding(
+                      session?.user?.email ?? gateEmail ?? null,
+                    );
+                  })();
+                }}
+                className="rounded-xl bg-[#0F172A] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-900"
+              >
+                Reintentar guardar
+              </button>
+            </div>
+          ) : otpSent ? (
             <div className="space-y-4 rounded-xl border border-emerald-100 bg-emerald-50/80 px-4 py-4">
               <p className="text-sm font-medium text-emerald-900">
                 Te enviaremos un enlace para iniciar sesión. Revisa tu correo (y

@@ -1,22 +1,71 @@
 import { NextResponse } from "next/server";
 import { requireCandidateLifecycleApi } from "@/lib/auth/apiRbac";
-import { buildCandidateProfilesUpsertRow } from "@/lib/candidate/candidateProfilesWritePayload";
+import {
+  buildCandidateProfilesUpsertRow,
+  type CandidateProfilesUpsertRow,
+} from "@/lib/candidate/candidateProfilesWritePayload";
 import {
   validateOnboardingProfilePayload,
   type OnboardingProfilePayload,
 } from "@/lib/candidate/onboardingPayload";
 
 export const runtime = "nodejs";
+const LOG_PREFIX = "[complete-pending-onboarding]";
+const IS_DEV = process.env.NODE_ENV !== "production";
+
+function isUndefinedColumnError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: string }).code;
+  const message = String((err as { message?: string }).message ?? "");
+  return code === "42703" || /column .* does not exist/i.test(message);
+}
+
+async function upsertCandidateProfileWithFallback(
+  supabase: any,
+  row: CandidateProfilesUpsertRow,
+) {
+  const primary = await supabase
+    .from("candidate_profiles")
+    .upsert(row, { onConflict: "id" })
+    .select("id")
+    .maybeSingle();
+
+  if (!primary.error || !isUndefinedColumnError(primary.error)) {
+    return primary;
+  }
+
+  console.warn(LOG_PREFIX, "schema drift fallback for candidate_profiles", {
+    message: primary.error.message,
+    details: primary.error.details,
+    hint: primary.error.hint,
+    code: primary.error.code,
+  });
+
+  const { summary: _summary, industries: _industries, ...legacyRow } = row;
+  return supabase
+    .from("candidate_profiles")
+    .upsert(legacyRow, { onConflict: "id" })
+    .select("id")
+    .maybeSingle();
+}
 
 /**
  * After magic link: assign candidate role + persist profile from localStorage draft.
  */
 export async function POST(request: Request) {
+  let rawBody: unknown = null;
   try {
     const gate = await requireCandidateLifecycleApi();
     if (gate instanceof NextResponse) return gate;
 
     const { supabase, userId, email: authEmail } = gate;
+    console.info(LOG_PREFIX, "auth session resolved", {
+      userId,
+      authEmail: authEmail ?? null,
+      dbRole: gate.dbRole,
+      effectiveRole: gate.effectiveRole,
+    });
+
     if (!authEmail?.trim()) {
       return NextResponse.json(
         { success: false, error: "Sesión no válida." },
@@ -24,7 +73,20 @@ export async function POST(request: Request) {
       );
     }
 
-    const body = (await request.json()) as Record<string, unknown>;
+    try {
+      rawBody = await request.json();
+    } catch (parseErr) {
+      console.error(LOG_PREFIX, "invalid JSON body", parseErr);
+      return NextResponse.json(
+        { success: false, error: "Solicitud inválida: JSON incorrecto." },
+        { status: 400 },
+      );
+    }
+
+    const body = rawBody as Record<string, unknown>;
+    if (IS_DEV) {
+      console.info(LOG_PREFIX, "incoming body", body);
+    }
 
     const sessionEmail = authEmail.trim();
     const row: OnboardingProfilePayload = {
@@ -44,6 +106,7 @@ export async function POST(request: Request) {
 
     const validationError = validateOnboardingProfilePayload(row);
     if (validationError) {
+      console.info(LOG_PREFIX, "payload validation failed", { validationError });
       return NextResponse.json(
         { success: false, error: validationError },
         { status: 400 },
@@ -60,12 +123,19 @@ export async function POST(request: Request) {
     );
 
     if (profileUpsertError) {
-      console.error("[complete-pending-onboarding] profiles", profileUpsertError);
+      console.error(LOG_PREFIX, "profiles upsert failed", {
+        message: profileUpsertError.message,
+        details: profileUpsertError.details,
+        hint: profileUpsertError.hint,
+        code: profileUpsertError.code,
+      });
+      const reason = profileUpsertError.message || "Error de base de datos.";
       return NextResponse.json(
         {
           success: false,
-          error: "No se pudo activar tu cuenta de candidato.",
-          reason: profileUpsertError.message,
+          error: reason,
+          reason,
+          code: profileUpsertError.code,
         },
         { status: 500 },
       );
@@ -75,26 +145,27 @@ export async function POST(request: Request) {
       ...row,
       email: sessionEmail,
     });
+    console.info(LOG_PREFIX, "candidate_profiles upsert payload", upsertRow);
 
-    const upsertResult = await supabase
-      .from("candidate_profiles")
-      .upsert(upsertRow, { onConflict: "id" })
-      .select("id")
-      .maybeSingle();
+    const upsertResult = await upsertCandidateProfileWithFallback(
+      supabase,
+      upsertRow,
+    );
 
     if (upsertResult.error) {
       const e = upsertResult.error as { message?: string; code?: string; details?: string; hint?: string };
-      console.error("[complete-pending-onboarding] candidate_profiles upsert", {
+      console.error(LOG_PREFIX, "candidate_profiles upsert failed", {
         message: e.message,
         code: e.code,
         details: e.details,
         hint: e.hint,
       });
+      const reason = upsertResult.error.message || "Error de base de datos.";
       return NextResponse.json(
         {
           success: false,
-          error: "No se pudo guardar tu perfil.",
-          reason: upsertResult.error.message,
+          error: reason,
+          reason,
           code: e.code,
         },
         { status: 500 },
@@ -104,7 +175,7 @@ export async function POST(request: Request) {
     const savedId = upsertResult.data?.id ?? userId;
     if (!upsertResult.data?.id) {
       console.warn(
-        "[complete-pending-onboarding] upsert ok but select returned no row (check RLS)",
+        `${LOG_PREFIX} upsert ok but select returned no row (check RLS)`,
         { userId },
       );
     }
@@ -115,7 +186,11 @@ export async function POST(request: Request) {
     );
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    console.error("[complete-pending-onboarding] unexpected", err);
+    console.error(LOG_PREFIX, "unexpected", {
+      reason,
+      rawBody,
+      stack: err instanceof Error ? err.stack : null,
+    });
     return NextResponse.json(
       { success: false, error: "Error inesperado.", reason },
       { status: 500 },

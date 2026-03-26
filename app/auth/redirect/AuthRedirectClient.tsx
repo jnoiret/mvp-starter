@@ -20,6 +20,7 @@ import { markShowFirstJobsAfterOnboarding } from "@/lib/onboardingFirstJobs";
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 
 const VALID_ROLES = new Set(["candidate", "recruiter", "admin"]);
+const IS_DEV = process.env.NODE_ENV !== "production";
 
 function isSafeCandidateNext(next: string): boolean {
   if (!next.startsWith("/") || next.startsWith("//")) return false;
@@ -88,10 +89,26 @@ export function AuthRedirectClient() {
       const pendingDraft =
         typeof window !== "undefined" ? loadOnboardingDraft() : null;
 
+      if (IS_DEV) {
+        console.info("[auth/redirect] pending draft check", {
+          hasDraft: Boolean(pendingDraft),
+          sessionUserId: session.user.id,
+          sessionEmail: session.user.email ?? null,
+        });
+      }
+
       if (pendingDraft) {
         if (!shouldApplyOnboardingDraft(profile, candidateRow?.id)) {
           clearOnboardingDraft();
         } else {
+          if (IS_DEV) {
+            console.info("[auth/redirect] applying pending onboarding draft", {
+              draft: pendingDraft,
+              profileRole: profile?.role ?? null,
+              hasCandidateRow: Boolean(candidateRow?.id),
+            });
+          }
+
           const body = {
             full_name: pendingDraft.full_name,
             whatsapp: pendingDraft.whatsapp,
@@ -106,6 +123,19 @@ export function AuthRedirectClient() {
             industries: pendingDraft.industries ?? "",
           };
 
+          if (IS_DEV) {
+            console.info("[auth/redirect] complete-pending payload", {
+              body,
+              draftEmail: pendingDraft.email,
+              authEmail: session.user.email ?? null,
+              emailMismatch:
+                Boolean(pendingDraft.email?.trim()) &&
+                Boolean(session.user.email?.trim()) &&
+                pendingDraft.email.trim().toLowerCase() !==
+                  String(session.user.email).trim().toLowerCase(),
+            });
+          }
+
           const res = await fetch("/api/candidate/complete-pending-onboarding", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -113,7 +143,30 @@ export function AuthRedirectClient() {
             body: JSON.stringify(body),
           });
 
-          const json = (await res.json()) as { success?: boolean };
+          let json: {
+            success?: boolean;
+            error?: string;
+            reason?: string;
+            code?: string;
+          } = {};
+          try {
+            json = (await res.json()) as typeof json;
+          } catch (parseErr) {
+            if (IS_DEV) {
+              console.error("[auth/redirect] complete-pending invalid JSON response", {
+                status: res.status,
+                parseErr,
+              });
+            }
+          }
+
+          if (IS_DEV) {
+            console.info("[auth/redirect] complete-pending response", {
+              status: res.status,
+              ok: res.ok,
+              json,
+            });
+          }
           if (cancelled) return;
 
           if (res.ok && json.success) {
@@ -154,7 +207,10 @@ export function AuthRedirectClient() {
             return;
           }
 
-          router.replace("/onboarding?error=guardar");
+          const rawReason =
+            (json.error || json.reason || json.code || `status_${res.status}`).trim();
+          const reason = encodeURIComponent(rawReason.slice(0, 180));
+          router.replace(`/onboarding?error=guardar&reason=${reason}`);
           return;
         }
       }

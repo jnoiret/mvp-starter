@@ -3,6 +3,7 @@ import { requireCandidateLifecycleApi } from "@/lib/auth/apiRbac";
 import {
   buildCandidateProfilesUpsertRow,
   CANDIDATE_PROFILES_WRITABLE_KEYS,
+  type CandidateProfilesUpsertRow,
 } from "@/lib/candidate/candidateProfilesWritePayload";
 import {
   validateOnboardingProfilePayload,
@@ -12,6 +13,7 @@ import {
 export const runtime = "nodejs";
 
 const LOG_PREFIX = "[onboarding-save]";
+const IS_DEV = process.env.NODE_ENV !== "production";
 
 type Body = Partial<OnboardingProfilePayload>;
 
@@ -37,6 +39,42 @@ function logSupabaseError(context: string, err: unknown) {
   }
 }
 
+function isUndefinedColumnError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: string }).code;
+  const message = String((err as { message?: string }).message ?? "");
+  return code === "42703" || /column .* does not exist/i.test(message);
+}
+
+async function upsertCandidateProfileWithFallback(
+  supabase: any,
+  row: CandidateProfilesUpsertRow,
+) {
+  const primary = await supabase
+    .from("candidate_profiles")
+    .upsert(row, { onConflict: "id" })
+    .select("id")
+    .maybeSingle();
+
+  if (!primary.error || !isUndefinedColumnError(primary.error)) {
+    return primary;
+  }
+
+  console.warn(LOG_PREFIX, "schema drift fallback for candidate_profiles", {
+    message: primary.error.message,
+    details: primary.error.details,
+    hint: primary.error.hint,
+    code: primary.error.code,
+  });
+
+  const { summary: _summary, industries: _industries, ...legacyRow } = row;
+  return supabase
+    .from("candidate_profiles")
+    .upsert(legacyRow, { onConflict: "id" })
+    .select("id")
+    .maybeSingle();
+}
+
 export async function POST(request: Request) {
   let rawBody: unknown = null;
 
@@ -45,6 +83,12 @@ export async function POST(request: Request) {
     if (gate instanceof NextResponse) return gate;
 
     const { supabase, userId, email: sessionEmailFromAuth } = gate;
+    console.info(LOG_PREFIX, "auth session resolved", {
+      userId,
+      authEmail: sessionEmailFromAuth ?? null,
+      dbRole: gate.dbRole,
+      effectiveRole: gate.effectiveRole,
+    });
 
     try {
       rawBody = await request.json();
@@ -57,6 +101,9 @@ export async function POST(request: Request) {
     }
 
     const body = rawBody as Body;
+    if (IS_DEV) {
+      console.info(LOG_PREFIX, "incoming payload", body);
+    }
 
     const yearsRaw = Number(body.years_experience);
     const salaryRaw = Number(body.expected_salary);
@@ -115,21 +162,22 @@ export async function POST(request: Request) {
 
       if (profileRoleError) {
         logSupabaseError("profiles upsert", profileRoleError);
+        const reason = profileRoleError.message || "Error de base de datos.";
         return NextResponse.json(
           {
             success: false,
-            error: "No se pudo preparar tu cuenta de candidato.",
-            reason: profileRoleError.message,
+            error: reason,
+            reason,
+            code: profileRoleError.code,
           },
           { status: 500 },
         );
       }
 
-      const upsertResult = await supabase
-        .from("candidate_profiles")
-        .upsert(upsertRow, { onConflict: "id" })
-        .select("id")
-        .maybeSingle();
+      const upsertResult = await upsertCandidateProfileWithFallback(
+        supabase,
+        upsertRow,
+      );
 
       if (upsertResult.error) {
         logSupabaseError("candidate_profiles upsert", upsertResult.error);
@@ -139,11 +187,12 @@ export async function POST(request: Request) {
           hint?: string;
           code?: string;
         };
+        const reason = pg.message ?? "Error de base de datos.";
         return NextResponse.json(
           {
             success: false,
-            error: "No se pudo guardar tu perfil.",
-            reason: pg.message ?? "Error de base de datos.",
+            error: reason,
+            reason,
             code: pg.code,
           },
           { status: 500 },
@@ -172,7 +221,7 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           success: false,
-          error: "No se pudo guardar tu perfil.",
+          error: message,
           reason: message,
         },
         { status: 500 },
